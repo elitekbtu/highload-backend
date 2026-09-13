@@ -1,0 +1,3 @@
+certs/keystore.p12
+.venv/
+.env
