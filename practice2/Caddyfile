@@ -1,0 +1,30 @@
+{
+  auto_https disable_redirects
+  servers :9443 {
+    protocols h1 h2 h3
+  }
+  servers :9444 {
+    protocols h1
+  }
+}
+
+
+:9443 {
+  tls certs/cert.pem certs/key.pem
+  reverse_proxy https://127.0.0.1:8443 {
+    transport http {
+      tls_insecure_skip_verify
+      versions 2
+    }
+  }
+}
+
+:9444 {
+  tls certs/cert.pem certs/key.pem
+  reverse_proxy https://127.0.0.1:8443 {
+    transport http {
+      tls_insecure_skip_verify
+      versions 2
+    }
+  }
+}

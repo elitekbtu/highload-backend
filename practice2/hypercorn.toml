@@ -1,0 +1,7 @@
+bind = ["127.0.0.1:8443"]
+certfile = "certs/cert.pem"
+keyfile = "certs/key.pem"
+alpn_protocols = ["h2", "http/1.1"]
+workers = 1
+backlog = 100
+keep_alive_timeout = 5

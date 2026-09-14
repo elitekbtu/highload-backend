@@ -1,0 +1,13 @@
+services:
+  lab:
+    build: .
+    ports:
+      - "9443:9443"
+      - "9443:9443/udp"
+      - "9444:9444"
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - .:/app
+      - /app/.venv
+    working_dir: /app

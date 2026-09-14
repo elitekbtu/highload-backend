@@ -1,0 +1,8 @@
+.venv
+.git
+__pycache__
+*.pyc
+.env
+certs/*.pem
+certs/*.p12
+REPORT.md

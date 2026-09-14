@@ -6,12 +6,15 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import pkcs12
 from cryptography.x509.oid import NameOID
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+CERTS = ROOT / "certs"
+CERTS.mkdir(exist_ok=True)
 
 
-# EC private key: secp256r1
 private_key = ec.generate_private_key(ec.SECP256R1())
 
-# CN=localhost
 subject = issuer = x509.Name(
     [
         x509.NameAttribute(NameOID.COMMON_NAME, "localhost"),
@@ -39,7 +42,6 @@ certificate = (
     .sign(private_key, hashes.SHA256())
 )
 
-# PKCS#12 keystore
 p12_data = pkcs12.serialize_key_and_certificates(
     name=b"practice",
     key=private_key,
@@ -48,6 +50,17 @@ p12_data = pkcs12.serialize_key_and_certificates(
     encryption_algorithm=serialization.BestAvailableEncryption(b"changeit"),
 )
 
-with open("../certs/keystore.p12", "wb") as f:
-    f.write(p12_data)
-print("Successfully created keystore.p12")
+(CERTS / "keystore.p12").write_bytes(p12_data)
+print(f"Wrote {CERTS / 'keystore.p12'}")
+
+# pem key and cert
+
+(CERTS / "key.pem").write_bytes(
+    private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+)
+(CERTS / "cert.pem").write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+print(f"Wrote {CERTS / 'cert.pem'} and {CERTS / 'key.pem'}")
