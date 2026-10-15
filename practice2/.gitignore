@@ -1,3 +1,5 @@
 certs/
 .venv/
 .env
+
+.DS_Store
