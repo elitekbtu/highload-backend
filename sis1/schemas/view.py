@@ -1,12 +1,9 @@
-from pydantic import BaseModel, ConfigDict
+from schemas.engagement import EngagementAccepted, EngagementRequest
 
 
-class ViewRequest(BaseModel):
-    username: str
-    post_id: int
+class ViewRequest(EngagementRequest):
+    pass
 
 
-class ViewResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    post_id: int
+class ViewResponse(EngagementAccepted):
+    pass

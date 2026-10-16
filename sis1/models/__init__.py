@@ -3,6 +3,7 @@ from models.like import Like
 from models.view import View
 from models.post import Post
 from models.user import User
+from models.counter import PostCounter
 
 
 __all__ = [
@@ -11,4 +12,5 @@ __all__ = [
     "View",
     "Post",
     "User",
+    "PostCounter",
 ]

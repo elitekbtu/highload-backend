@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, Integer
+from sqlalchemy import ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from models.base import Base
+from models.base import Base, ID_TYPE
 
 if TYPE_CHECKING:
     from models import Post, User
@@ -13,8 +13,9 @@ if TYPE_CHECKING:
 
 class View(Base):
     __tablename__ = "views"
+    __table_args__ = (UniqueConstraint("post_id", "user_id", name="uq_views_post_user"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(ID_TYPE, primary_key=True, autoincrement=True)
 
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
@@ -23,7 +24,6 @@ class View(Base):
 
     post_id: Mapped[int] = mapped_column(
         ForeignKey("posts.id", ondelete="CASCADE"),
-        index=True,
     )
 
     post: Mapped[Post] = relationship(

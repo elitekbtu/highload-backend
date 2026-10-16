@@ -1,46 +1,14 @@
-from fastapi import APIRouter, HTTPException
-
-
-from sqlalchemy import select
-from starlette.status import HTTP_201_CREATED, HTTP_404_NOT_FOUND
+from fastapi import APIRouter, status
 
 from database.session import SessionDB
-from models import Like, Post, User
+from routes.engagement import accept_event
 from schemas.like import LikeRequest, LikeResponse
-
+from services.cache import CacheDep
+from services.publisher import PublisherDep
 
 router = APIRouter(prefix="/like", tags=["Like"])
 
 
-
-@router.post(
-    "",
-    response_model=LikeResponse,
-    status_code=HTTP_201_CREATED,
-)
-def post_like(obj_in: LikeRequest, db: SessionDB):
-    post = db.get(Post, obj_in.post_id)
-    if post is None:
-        raise HTTPException(
-            status_code=HTTP_404_NOT_FOUND,
-            detail="Post not found",
-        )
-
-    user = db.scalar(
-        select(User).where(User.username == obj_in.username)
-    )
-
-    if user is None:
-        user = User(username=obj_in.username)
-        db.add(user)
-        db.flush()
-
-    like = Like(
-        post_id=post.id,
-        user_id=user.id,
-    )
-    db.add(like)
-    db.commit()
-    db.refresh(like)
-
-    return LikeResponse.model_validate(like)
+@router.post("", response_model=LikeResponse, status_code=status.HTTP_202_ACCEPTED)
+async def post_like(obj_in: LikeRequest, db: SessionDB, publisher: PublisherDep, cache: CacheDep):
+    return await accept_event("like", obj_in, db, publisher, cache)

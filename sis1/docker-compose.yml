@@ -1,0 +1,172 @@
+x-app: &app
+  build:
+    context: .
+    target: app
+  image: ${COMPOSE_PROJECT_NAME:-sis1}-app
+  environment: &app-env
+    DATABASE_URL: postgresql+asyncpg://sis1:${POSTGRES_PASSWORD:-sis1}@postgres:5432/sis1
+    REDIS_URL: redis://redis:6379/0
+    KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+    WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE:-500}
+    WORKER_POLL_MS: ${WORKER_POLL_MS:-100}
+    COUNTER_CACHE_TTL_MS: ${COUNTER_CACHE_TTL_MS:-300}
+
+x-kafka: &kafka
+  image: apache/kafka:4.1.2
+  depends_on:
+    kafka-storage: {condition: service_completed_successfully}
+  environment: &kafka-env
+    CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    KAFKA_PROCESS_ROLES: broker,controller
+    KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+    KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093
+    KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+    KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+    KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+    KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+    KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+    KAFKA_MIN_INSYNC_REPLICAS: 2
+    KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+    KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+  healthcheck:
+    test: [CMD-SHELL, /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1]
+    interval: 10s
+    timeout: 10s
+    retries: 20
+    start_period: 20s
+
+services:
+  kafka-storage:
+    image: alpine:3.22
+    command: [chown, "1000:1000", /data/1, /data/2, /data/3]
+    volumes:
+      - kafka-1-data:/data/1
+      - kafka-2-data:/data/2
+      - kafka-3-data:/data/3
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: sis1
+      POSTGRES_USER: sis1
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sis1}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U sis1 -d sis1]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    command: [redis-server, --maxmemory, 256mb, --maxmemory-policy, allkeys-lru, --save, "", --appendonly, "no"]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  kafka-1:
+    <<: *kafka
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-1:9092
+    volumes:
+      - kafka-1-data:/tmp/kraft-combined-logs
+
+  kafka-2:
+    <<: *kafka
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 2
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-2:9092
+    volumes:
+      - kafka-2-data:/tmp/kraft-combined-logs
+
+  kafka-3:
+    <<: *kafka
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-3:9092
+    volumes:
+      - kafka-3-data:/tmp/kraft-combined-logs
+
+  kafka-topics:
+    image: apache/kafka:4.1.2
+    depends_on:
+      kafka-1: {condition: service_healthy}
+      kafka-2: {condition: service_healthy}
+      kafka-3: {condition: service_healthy}
+    entrypoint: [/bin/bash, -ec]
+    command:
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic engagements --partitions 64 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=259200000
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists --topic engagements-dlq --partitions 3 --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=604800000
+
+  migrate:
+    <<: *app
+    command: [alembic, upgrade, head]
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  api:
+    <<: *app
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      kafka-topics: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  worker:
+    <<: *app
+    command: [python, -m, worker]
+    expose: ["8001"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      kafka-topics: {condition: service_completed_successfully}
+    restart: unless-stopped
+    stop_grace_period: 20s
+
+  tests:
+    profiles: [test]
+    build:
+      context: .
+      target: test
+    environment:
+      <<: *app-env
+      TEST_API_URL: http://api:8000
+      TEST_DATABASE_URL: postgresql+asyncpg://sis1:${POSTGRES_PASSWORD:-sis1}@postgres:5432/sis1
+    depends_on:
+      api: {condition: service_healthy}
+      worker: {condition: service_started}
+    command: [pytest, -q]
+
+  load:
+    profiles: [load]
+    image: grafana/k6:1.0.0
+    volumes:
+      - ./load.js:/scripts/load.js:ro
+    environment:
+      BASE_URL: http://api:8000
+      RATE: ${RATE:-100}
+      DURATION: ${DURATION:-30s}
+    command: [run, /scripts/load.js]
+    depends_on:
+      api: {condition: service_healthy}
+      worker: {condition: service_started}
+
+volumes:
+  postgres-data:
+  kafka-1-data:
+  kafka-2-data:
+  kafka-3-data:

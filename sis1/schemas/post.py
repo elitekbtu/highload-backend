@@ -1,8 +1,8 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PostRequest(BaseModel):
-    content: str | None
+    content: str | None = Field(default=None, max_length=10000, pattern=r"^[^\x00]*$")
 
 
 class PostResponse(BaseModel):

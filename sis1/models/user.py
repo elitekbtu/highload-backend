@@ -3,10 +3,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 
-from sqlalchemy import Text, Integer
+from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from models import Base
+from models.base import Base, ID_TYPE
 
 if TYPE_CHECKING:
     from models import Like, View
@@ -15,9 +15,9 @@ if TYPE_CHECKING:
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(ID_TYPE, primary_key=True, autoincrement=True)
 
-    username: Mapped[str] = mapped_column(Text, unique=True)
+    username: Mapped[str] = mapped_column(String(128), unique=True)
 
     views: Mapped[list[View]] = relationship(
         "View",
