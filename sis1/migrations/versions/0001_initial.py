@@ -1,4 +1,3 @@
-"""Posts, users, permanent deduplication and striped counters."""
 from alembic import op
 import sqlalchemy as sa
 

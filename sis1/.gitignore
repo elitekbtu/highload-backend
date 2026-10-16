@@ -5,6 +5,10 @@ __pycache__
 *.db-wal
 .env
 .pytest_cache/
+architecture/dist/
+architecture/assets/
+architecture/node_modules/
+architecture/.likec4/
 
 
 

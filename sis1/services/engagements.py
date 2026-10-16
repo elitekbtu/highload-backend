@@ -18,7 +18,6 @@ class BatchResult:
 
 
 async def apply_events(db: AsyncSession, events: list[EngagementEvent]) -> BatchResult:
-    """Called inside one transaction; Kafka offsets must be committed afterwards."""
     result = BatchResult()
     if not events:
         return result
@@ -36,7 +35,6 @@ async def apply_events(db: AsyncSession, events: list[EngagementEvent]) -> Batch
     users = dict((await db.execute(select(User.username, User.id).where(User.username.in_(names)))).all())
     increments = defaultdict(lambda: {"likes_count": 0, "views_count": 0})
 
-    # Stable lock ordering reduces deadlocks between workers processing overlapping batches.
     for kind, model, column in (("like", Like, "likes_count"), ("view", View, "views_count")):
         incoming = [e for e in events if e.kind == kind]
         rows = sorted({(e.post_id, users[e.username]) for e in incoming})

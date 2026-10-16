@@ -64,8 +64,6 @@ async def run() -> None:
                             "offset": message.offset, "reason": "invalid event schema",
                             "payload_base64": base64.b64encode(message.value or b"").decode(),
                         })
-            # Retain this exact batch until DB commit. Fetching the next batch on an
-            # error could accidentally commit past records which were never applied.
             backoff = 0.1
             while True:
                 try:
@@ -85,8 +83,6 @@ async def run() -> None:
                 {"reason": "post no longer exists", "event": event.model_dump(mode="json")}
                 for event in result.rejected
             ]
-            # A DLQ outage also keeps offsets uncommitted. Replaying the already
-            # committed DB transaction remains safe due to business uniqueness.
             for letter in dead_letters:
                 await dlq.send_and_wait(settings.kafka_dlq_topic, json.dumps(letter).encode())
                 REJECTED.inc()

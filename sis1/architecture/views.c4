@@ -1,0 +1,153 @@
+views {
+  view index {
+    title '01 · Архитектура / C1 · Контекст'
+    description '''
+      **SIS1: точные счётчики лайков и просмотров.**
+
+      Один пользователь может добавить один лайк и один просмотр на пост за всё время.
+      Дубли запросов и повторная доставка Kafka сохраняют результат.
+
+      **Цели:** 20 000 инкрементов/с; 50 млн постов; видимость p99 ≤ 2 с.
+      Допущения: приём p99 ≤ 150 мс, чтение p99 ≤ 100 мс в штатном режиме.
+      В прототипе подтверждён только короткий профиль 1000 RPS.
+
+      Откройте SIS1, чтобы перейти к сервисам, затем внутрь API или worker.
+      Синие узлы — API; зелёные — обработка; янтарные — Kafka;
+      фиолетовые — постоянные данные; розовые — кэш и ошибки.
+    '''
+    include client, counters, operator
+    autoLayout LeftRight
+  }
+
+  view containers of counters {
+    title '01 · Архитектура / C2 · Сервисы'
+    description '''
+      **Реализовано в Compose.** API и worker — отдельные процессы.
+      Kafka хранит принятые события; PostgreSQL обеспечивает точную дедупликацию.
+      Redis содержит только кэш. Worker не обновляет Redis: значение освежается по TTL.
+
+      202 подтверждает Kafka ack. Изменение счётчика происходит позже в транзакции worker.
+      Откройте API, worker, Kafka или PostgreSQL для следующего уровня детализации.
+    '''
+    include client, counters.api, counters.kafka, counters.worker, counters.postgres, counters.redis
+    include counters.api -> counters.kafka with { title 'Событие · acks=all'; color busAmber; line solid }
+    include counters.kafka -> counters.worker with { title 'Пакет ≤ 500'; color workerGreen; line solid }
+    include counters.worker -> counters.kafka with { title 'DLQ + offsets'; color busAmber }
+    include counters.api -> counters.postgres with { title 'Посты и cache miss'; color dataViolet }
+    include counters.worker -> counters.postgres with { title 'UNIQUE + счётчики'; color dataViolet; line solid }
+    autoLayout LeftRight
+  }
+
+  view api_components of counters.api {
+    title '01 · Архитектура / C3 · API'
+    description 'Реальные модули одного процесса FastAPI. Приём события и чтение счётчиков используют общий CounterCache. POST /post создаёт пост в PostgreSQL напрямую; Kafka используется для лайков и просмотров.'
+    include client, counters.api.*, counters.kafka.events, counters.redis, counters.postgres
+    autoLayout LeftRight
+  }
+
+  view worker_components of counters.worker {
+    title '01 · Архитектура / C3 · Worker'
+    description 'Логические этапы worker.run() и функция apply_events(), выполняемые одним процессом. Весь пакет удерживается при ошибке БД; повторяется с backoff от 100 мс до 2 с. Невалидные события не блокируют пакет после подтверждённой отправки в DLQ.'
+    include counters.worker.*, counters.kafka.*, counters.postgres
+    autoLayout LeftRight
+  }
+
+  view kafka_topics of counters.kafka {
+    title '01 · Архитектура / Kafka · События и offsets'
+    description 'Три разных назначения топиков: входящие события, отклонённые записи и позиция чтения группы. Idempotent producer подавляет транспортные повторы; бизнес-дедупликацию выполняет UNIQUE в PostgreSQL. Retention журнала не заменяет backup истории взаимодействий.'
+    include counters.api.publisher, counters.kafka.*, counters.worker.consumer, counters.worker.completion
+    autoLayout LeftRight
+  }
+
+  view data_model of counters.postgres {
+    title '01 · Архитектура / Данные · Ключи и инварианты'
+    description '''
+      **Одна PostgreSQL БД в прототипе.** UNIQUE(post_id, user_id) действует отдельно для likes и views.
+      INSERT ON CONFLICT DO NOTHING RETURNING возвращает только новые взаимодействия.
+      Эти строки и UPSERT полос коммитятся одной транзакцией: дубль даёт нулевое приращение.
+
+      16 полос снижают конкуренцию за популярный пост. Они не уменьшают объём бессрочной дедупликации.
+      API удаления нет. При прямом удалении пользователя CASCADE удалит взаимодействия,
+      но сам по себе не пересчитает агрегаты: для поддержки удаления нужен отдельный алгоритм.
+    '''
+    include counters.postgres.*
+    autoLayout LeftRight
+  }
+}
+
+views {
+  dynamic view increment {
+    title '02 · Сценарии / Запись · Приём и дедупликация'
+    description 'Показан cache hit для наличия поста. При cache miss API проверяет posts; отсутствующий пост даёт 404 до публикации. Новый запрос на ту же пару получает новый event_id, но бизнес-ключ остаётся прежним.'
+    variant sequence
+    client -> counters.api 'POST /like или /view'
+    counters.api -> counters.redis 'Пост существует?'
+    counters.api <- counters.redis 'Да · cache hit'
+    counters.api -> counters.kafka.events 'send_and_wait' {
+      notes 'Ключ post_id:username; acks=all, min ISR 2. 429 при переполнении pending, 503 при отсутствии ack.'
+    }
+    counters.api <- counters.kafka.events 'Kafka ack'
+    client <- counters.api '202 Accepted + event_id'
+    counters.kafka.events -> counters.worker 'Пакет событий'
+    counters.worker -> counters.postgres 'BEGIN · users · INSERT RETURNING'
+    alt {
+      when 'Новое взаимодействие' {
+        counters.worker -> counters.postgres 'UPSERT stripe = user_id % 16'
+      }
+      else 'Повтор пользователя на пост' {
+        counters.worker -> counters.postgres '0 новых строк → 0 инкрементов'
+      }
+    }
+    counters.worker -> counters.postgres 'COMMIT'
+    counters.worker -> counters.kafka.offsets 'Commit offsets' {
+      navigateTo replay
+    }
+  }
+
+  dynamic view read_counter {
+    title '02 · Сценарии / Чтение · Кэш и fallback'
+    description 'SET NX не продлевает жизнь старого значения. TTL 300 мс уменьшается на время чтения БД. Ошибка Redis обрабатывается как cache miss. Полная задержка видимости также включает очередь и обработку worker.'
+    variant sequence
+    client -> counters.api 'GET /post/{id}'
+    counters.api -> counters.redis 'GET counter:v1:{id}'
+    alt {
+      when 'Cache hit' {
+        counters.api <- counters.redis 'Готовый JSON'
+        client <- counters.api '200 · счётчики'
+      }
+      else 'Cache miss или Redis недоступен' {
+        counters.api -> counters.postgres 'SELECT post + SUM ≤ 16 полос'
+        counters.api <- counters.postgres 'Пост и счётчики'
+        opt 'Redis доступен и остаток TTL > 0' {
+          counters.api -> counters.redis 'SET NX · остаток от 300 мс'
+        }
+        client <- counters.api '200 · счётчики'
+      }
+    }
+  }
+
+  dynamic view replay {
+    title '02 · Сценарии / Сбой · Replay после commit'
+    description 'Между PostgreSQL и Kafka нет распределённой транзакции. Эффект в БД идемпотентен благодаря уникальности взаимодействий. При сбое до DB commit весь пакет откатывается; здесь показан более сложный сбой после commit.'
+    variant sequence
+    counters.kafka.events -> counters.worker 'Пакет N'
+    counters.worker -> counters.postgres 'Новые взаимодействия + полосы · COMMIT'
+    counters.worker -> counters.worker 'Сбой до commit offsets'
+    counters.kafka.events -> counters.worker 'Пакет N · повтор после рестарта'
+    counters.worker -> counters.postgres 'UNIQUE → 0 новых строк · COMMIT'
+    counters.worker -> counters.kafka.offsets 'Commit offsets · счётчики прежние'
+  }
+
+  dynamic view rejected_event {
+    title '02 · Сценарии / Ошибки · DLQ и порядок подтверждений'
+    description 'Один пакет может содержать валидные и отклонённые записи. При недоступности DLQ offsets остаются прежними, worker перезапускается; уже применённые записи безопасно повторяются. DLQ может содержать повторные письма.'
+    variant sequence
+    counters.kafka.events -> counters.worker 'Пакет: валидные + ошибка схемы'
+    counters.worker -> counters.worker 'Проверить EngagementEvent'
+    counters.worker -> counters.postgres 'Применить валидные; отклонить отсутствующие посты'
+    counters.worker <- counters.postgres 'DB commit'
+    counters.worker -> counters.kafka.dlq 'Ошибки схемы + отсутствующие посты'
+    counters.worker <- counters.kafka.dlq 'DLQ ack'
+    counters.worker -> counters.kafka.offsets 'Commit offsets всего пакета'
+  }
+}

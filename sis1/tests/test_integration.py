@@ -48,7 +48,6 @@ async def test_real_kafka_worker_and_cache():
         post_id = post["id"]
         name = f"pipeline-{uuid4()}"
         payload = {"post_id": post_id, "username": name}
-        # Warm the consumer group before measuring the steady-state freshness budget.
         assert (await client.post("/view", json=payload)).status_code == 202
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:

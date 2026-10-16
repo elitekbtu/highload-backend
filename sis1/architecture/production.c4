@@ -1,0 +1,90 @@
+model {
+  target = system 'Production · целевой вариант' {
+    description 'Проектируемая ступень после Compose. Требует отдельной реализации и нагрузочного подтверждения.'
+
+    edge = service 'Балансировщик' {
+      technology 'HTTPS · auth · rate limits'
+      description 'Проверенный постоянный user_id. Маршрутизация только на готовые API.'
+    }
+    api = service 'API replicas' {
+      technology 'Stateless FastAPI · N + запас'
+      description 'Приём событий и чтение. Число реплик определяется измеренной безопасной пропускной способностью.'
+      style { multiple true }
+    }
+    kafka = queue 'Kafka · 3 зоны' {
+      technology '64 partitions · RF 3 · min ISR 2'
+      description 'Брокеры в независимых зонах. Доставка at least once; переживает потерю одного брокера при ISR ≥ 2.'
+    }
+    workers = service 'Worker replicas' {
+      technology 'Одна consumer group · batch 500'
+      description 'До 64 активных consumer при 64 партициях. PostgreSQL остаётся возможным пределом масштабирования.'
+      style {
+        color workerGreen
+        multiple true
+      }
+    }
+    primary = database 'PostgreSQL primary' {
+      technology 'NVMe · UNIQUE · 16 stripes'
+      description 'Один writer до достижения измеренного предела. Затем нужны маршрутизация по шардам и изменение чтений.'
+    }
+    standby = database 'PostgreSQL standby' {
+      technology 'Другая зона · HA failover'
+      description 'План: синхронная репликация, fencing прежнего primary и переключение write endpoint. RPO/RTO проверяются отказными тестами.'
+    }
+    backup = database 'Backup + WAL archive' {
+      technology 'Отдельное хранилище · PITR'
+      description 'Сохраняет бессрочную историю дедупликации. При restore offsets возвращают к точке не позднее восстановленного состояния БД.'
+      style { color gray }
+    }
+    redis = database 'Redis HA' {
+      technology 'Кэш · короткий TTL'
+      description 'Ошибки кэша → primary. Нужен запас DB capacity на массовый cache miss.'
+      style { color cacheRose }
+    }
+    observability = service 'Метрики и алерты' {
+      technology 'Prometheus · Grafana'
+      description 'HTTP p99, возраст событий, consumer lag, DB locks/WAL, cache hit rate. План: admission control по возрасту очереди.'
+      style { color gray }
+    }
+  }
+
+  client -> target.edge 'HTTPS'
+  target.edge -> target.api 'Готовые реплики'
+  target.api -> target.kafka 'Publish · acks=all'
+  target.kafka -> target.workers 'Распределение партиций'
+  target.workers -> target.primary 'Транзакции пакетов'
+  target.api -> target.primary 'Каталог и cache miss'
+  target.api -> target.redis 'Cache-aside'
+  target.primary -> target.standby 'Репликация'
+  target.primary -> target.backup 'Backup + WAL'
+  target.observability -> target.api 'Scrape HTTP metrics'
+  target.observability -> target.workers 'Scrape lag и event age'
+}
+
+views {
+  view production of target {
+    title '03 · Развёртывание / Production · План масштабирования'
+    description '''
+      **План, не состав текущего Compose.** Нужны балансировщик, проверенная авторизация,
+      независимые зоны, управление failover, резервное копирование и сбор метрик.
+      Метрики API/worker уже реализованы; Prometheus и Grafana в Compose отсутствуют.
+
+      N ≥ ceil(20 000 / безопасные RPS одной реплики) + запас.
+      При 64 партициях средний поток — 312,5 событий/с на партицию.
+      Полные пакеты по 500 дают около 40 DB-транзакций/с, но число вставок и WAL зависит от доли новых взаимодействий.
+
+      **Оценка Kafka:** 20 000 × 200 байт = 4 МБ/с; 72 ч × RF 3 ≈ 3,11 ТБ без сжатия и запаса.
+      **Дедупликация:** 1,728 млрд событий/сутки. При 10% новых — 172,8 млн строк/сутки;
+      за 90 суток при 140 байт/строку с индексами ≈ 2,18 ТБ на primary до WAL и backup.
+      Это допущения для sizing, которые проверяют на репрезентативных данных.
+
+      При исчерпании одного primary следующий этап — шарды по хешу (post_id, user_id),
+      стабильные user_id, локальная дедупликация на шарде и fan-out суммирования полос.
+      Такая схема требует изменения worker и API; увеличение числа worker само по себе её не реализует.
+      Приёмка: одновременно 20k RPS без роста lag, HTTP p99 ≤ 150 мс,
+      чтение p99 ≤ 100 мс и видимость p99 ≤ 2 с на целевом объёме.
+    '''
+    include client, target.*
+    autoLayout LeftRight
+  }
+}

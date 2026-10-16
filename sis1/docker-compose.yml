@@ -37,6 +37,27 @@ x-kafka: &kafka
     start_period: 20s
 
 services:
+  architecture:
+    profiles: [docs]
+    image: ghcr.io/likec4/likec4:1.59.2
+    init: true
+    working_dir: /data
+    command: [serve, --listen, 0.0.0.0, --port, "5173", --hmr-port, "${ARCHITECTURE_HMR_PORT:-24678}"]
+    ports:
+      - "127.0.0.1:${ARCHITECTURE_PORT:-5173}:5173"
+      - "127.0.0.1:${ARCHITECTURE_HMR_PORT:-24678}:${ARCHITECTURE_HMR_PORT:-24678}"
+    environment:
+      CHOKIDAR_USEPOLLING: "1"
+      CHOKIDAR_INTERVAL: "500"
+    volumes:
+      - ./architecture:/data
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://localhost:5173').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+
   kafka-storage:
     image: alpine:3.22
     command: [chown, "1000:1000", /data/1, /data/2, /data/3]

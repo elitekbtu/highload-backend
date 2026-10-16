@@ -1,0 +1,146 @@
+model {
+  client = person 'Пользователь' {
+    description 'Один лайк и один просмотр на пост за всё время.'
+  }
+  operator = person 'Оператор' {
+    description 'Миграции, метрики, consumer lag и восстановление.'
+  }
+
+  counters = system 'SIS1 · счётчики постов' {
+    description '20 000 RPS · 50 млн постов · видимость p99 ≤ 2 с. Целевые требования; прототип проверен коротким профилем 1000 RPS.'
+
+    api = service 'Async API' {
+      technology 'FastAPI · Python 3.12'
+      description 'Принимает события и читает счётчики. Ответ 202 после Kafka ack.'
+
+      http = component 'HTTP routes' {
+        technology 'routes/like.py · view.py · post.py'
+        description 'Pydantic-валидация. POST /like, POST /view, POST и GET /post/.'
+      }
+      accept = component 'Приём события' {
+        technology 'routes/engagement.py'
+        description 'Проверяет пост. Создаёт event_id, kind и accepted_at_ms.'
+      }
+      publisher = component 'EventPublisher' {
+        technology 'services/publisher.py · aiokafka'
+        description 'acks=all, idempotence, LZ4. Лимит pending → 429; таймаут ack → 503.'
+      }
+      posts = component 'Посты и счётчики' {
+        technology 'routes/post.py · AsyncSession'
+        description 'Создание и cursor pagination. На cache miss читает SUM до 16 полос.'
+      }
+      cache = component 'CounterCache' {
+        technology 'services/cache.py · redis.asyncio'
+        description 'SET NX, таймаут 50 мс. Ошибка Redis → чтение PostgreSQL.'
+        style { color cacheRose }
+      }
+    }
+    worker = service 'Counter workers' {
+      technology 'aiokafka · SQLAlchemy async'
+      description 'Группа counter-workers-v1. Пакеты до 500 событий; poll 100 мс.'
+      style { color workerGreen }
+
+      consumer = component 'Чтение пакета' {
+        technology 'worker.py · getmany()'
+        description 'Автоматический commit выключен. Пакет удерживается до успешной обработки.'
+        style { color workerGreen }
+      }
+      decoder = component 'Валидация события' {
+        technology 'worker.py · EngagementEvent'
+        description 'Валидные события → транзакция. Ошибки схемы → список dead letters.'
+        style { color workerGreen }
+      }
+      transaction = component 'Применение пакета' {
+        technology 'services/engagements.py · apply_events()'
+        description 'Одна транзакция: users, UNIQUE likes/views и приращения post_counters.'
+        style { color workerGreen }
+      }
+      completion = component 'Завершение пакета' {
+        technology 'worker.py · send_and_wait() / commit()'
+        description 'DB commit → DLQ ack → commit offsets. При ошибке replay безопасен.'
+        style { color workerGreen }
+      }
+    }
+    kafka = queue 'Kafka' {
+      technology '3 brokers · Kafka 4.1.2'
+      description 'RF 3 · min ISR 2. Ключ post_id:username распределяет горячий пост.'
+
+      events = queue 'engagements' {
+        technology '64 partitions · retention 72 ч'
+        description 'event_id, post_id, username, kind, accepted_at_ms. At least once.'
+      }
+      dlq = queue 'engagements-dlq' {
+        technology '3 partitions · retention 7 суток'
+        description 'Ошибки схемы и отсутствующие посты. Возможны повторные dead letters.'
+        style { color cacheRose }
+      }
+      offsets = queue '__consumer_offsets' {
+        technology 'Kafka internal topic'
+        description 'Подтверждённая позиция consumer group. Обновляется после DB commit и DLQ ack.'
+      }
+    }
+    postgres = database 'PostgreSQL' {
+      technology 'PostgreSQL 17 · asyncpg'
+      description 'Источник истины. Дедупликация бессрочная; счётчики атомарны с взаимодействиями.'
+
+      posts = table 'posts' {
+        technology 'PK id BIGINT'
+        description 'content TEXT. Целевой каталог: 50 млн постов.'
+      }
+      users = table 'users' {
+        technology 'PK id BIGINT · UNIQUE username'
+        description 'В прототипе username — учебная идентификация. Авторизации нет.'
+      }
+      likes = table 'likes' {
+        technology 'UNIQUE (post_id, user_id)'
+        description 'Один лайк навсегда. Только INSERT RETURNING даёт новый инкремент.'
+      }
+      view_records = table 'views' {
+        technology 'UNIQUE (post_id, user_id)'
+        description 'Один просмотр навсегда. Без окон и TTL.'
+      }
+      stripes = table 'post_counters' {
+        technology 'PK (post_id, stripe) · BIGINT counts'
+        description 'stripe = user_id % 16. UPSERT новых инкрементов; чтение SUM полос.'
+      }
+    }
+    redis = database 'Redis' {
+      technology 'Redis 7.4 · cache-aside'
+      description 'Счётчики: TTL 300 мс. Наличие поста: TTL 30 с. Восстанавливаемый кэш.'
+      style { color cacheRose }
+    }
+    migrate = job 'Alembic' {
+      technology 'alembic upgrade head'
+      description 'Однократный job до API и worker. Advisory lock сериализует миграции.'
+    }
+  }
+
+  client -> counters.api.http 'HTTP / JSON'
+  operator -> counters.api 'Health и API metrics'
+  operator -> counters.worker 'Lag и возраст событий'
+  operator -> counters.migrate 'Применить миграции'
+  counters.api.http -> counters.api.accept 'POST /like, /view'
+  counters.api.http -> counters.api.posts 'POST и GET /post'
+  counters.api.accept -> counters.api.cache 'Проверить post:exists'
+  counters.api.accept -> counters.postgres.posts 'Проверить пост при cache miss'
+  counters.api.accept -> counters.api.publisher 'Отправить событие'
+  counters.api.publisher -> counters.kafka.events 'Publish · acks=all'
+  counters.api.posts -> counters.api.cache 'Прочитать или заполнить кэш'
+  counters.api.posts -> counters.postgres.posts 'Создание и чтение постов'
+  counters.api.posts -> counters.postgres.stripes 'SUM ≤ 16 строк'
+  counters.api.cache -> counters.redis 'GET / SET NX'
+  counters.kafka.events -> counters.worker.consumer 'Consume · batch ≤ 500'
+  counters.worker.consumer -> counters.worker.decoder 'Пакет и offsets'
+  counters.worker.decoder -> counters.worker.transaction 'Валидные события'
+  counters.worker.decoder -> counters.worker.completion 'Невалидные записи'
+  counters.worker.transaction -> counters.postgres 'UNIQUE + UPSERT · COMMIT'
+  counters.worker.transaction -> counters.worker.completion 'Результат после DB commit'
+  counters.worker.completion -> counters.kafka.dlq 'Dead letters · await ack'
+  counters.worker.completion -> counters.kafka.offsets 'Commit offsets'
+  counters.migrate -> counters.postgres 'Версии схемы'
+  counters.postgres.likes -> counters.postgres.posts 'post_id · CASCADE'
+  counters.postgres.likes -> counters.postgres.users 'user_id · CASCADE'
+  counters.postgres.view_records -> counters.postgres.posts 'post_id · CASCADE'
+  counters.postgres.view_records -> counters.postgres.users 'user_id · CASCADE'
+  counters.postgres.stripes -> counters.postgres.posts 'post_id · CASCADE'
+}

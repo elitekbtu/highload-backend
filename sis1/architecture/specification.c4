@@ -1,0 +1,46 @@
+specification {
+  color apiBlue #2563EB
+  color workerGreen #10B981
+  color dataViolet #7C3AED
+  color cacheRose #E11D48
+  color busAmber #D97706
+
+  element person {
+    style {
+      shape person
+      color gray
+    }
+  }
+  element system {
+    style { color apiBlue }
+  }
+  element service {
+    style { color apiBlue }
+  }
+  element component {
+    style { color apiBlue }
+  }
+  element database {
+    style {
+      shape storage
+      color dataViolet
+    }
+  }
+  element queue {
+    style {
+      shape queue
+      color busAmber
+    }
+  }
+  element table {
+    style {
+      shape storage
+      color dataViolet
+    }
+  }
+  element job {
+    style { color gray }
+  }
+  deploymentNode environment
+  deploymentNode container
+}

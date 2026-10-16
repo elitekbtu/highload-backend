@@ -1,0 +1,39 @@
+deployment {
+  local = environment 'Docker Compose · один хост' {
+    description 'Базовый docker-compose.yml: один API и один worker. worker можно масштабировать через --scale worker=N. Три брокера на одном хосте не защищают от потери хоста. Балансировщик, PG replica, backup и шардирование не реализованы.'
+
+    api = container 'api · :8000' {
+      instanceOf counters.api
+    }
+    worker = container 'worker · internal :8001' {
+      instanceOf counters.worker
+    }
+    postgres = container 'postgres · volume' {
+      instanceOf counters.postgres
+    }
+    redis = container 'redis · cache only' {
+      instanceOf counters.redis
+    }
+    kafka1 = container 'kafka-1 · volume' {
+      instanceOf counters.kafka
+    }
+    kafka2 = container 'kafka-2 · volume' {
+      instanceOf counters.kafka
+    }
+    kafka3 = container 'kafka-3 · volume' {
+      instanceOf counters.kafka
+    }
+    migrate = container 'migrate · one-shot' {
+      instanceOf counters.migrate
+    }
+  }
+}
+
+views {
+  deployment view compose {
+    title '03 · Развёртывание / Compose · Реализованный стенд'
+    description 'Реализованный стенд по умолчанию. API и worker ждут migrate и kafka-topics. Служебные kafka-storage и kafka-topics подготавливают volumes и топики; здесь показаны процессы обработки данных и миграция. LikeC4 — отдельный профиль docs и не участвует в обработке запросов.'
+    include local.**
+    autoLayout LeftRight
+  }
+}
