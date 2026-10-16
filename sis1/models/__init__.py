@@ -2,6 +2,7 @@ from models.base import Base
 from models.like import Like
 from models.view import View
 from models.post import Post
+from models.user import User
 
 
 __all__ = [
@@ -9,4 +10,5 @@ __all__ = [
     "Like",
     "View",
     "Post",
+    "User",
 ]

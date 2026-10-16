@@ -1,14 +1,16 @@
 from fastapi import APIRouter, HTTPException
-from schemas.like import LikeRequest, LikeResponse
 
 
+from sqlalchemy import select
 from starlette.status import HTTP_201_CREATED, HTTP_404_NOT_FOUND
 
 from database.session import SessionDB
-from models import Like
-from models import Post
+from models import Like, Post, User
+from schemas.like import LikeRequest, LikeResponse
+
 
 router = APIRouter(prefix="/like", tags=["Like"])
+
 
 
 @router.post(
@@ -16,11 +18,7 @@ router = APIRouter(prefix="/like", tags=["Like"])
     response_model=LikeResponse,
     status_code=HTTP_201_CREATED,
 )
-def post_like(
-    obj_in: LikeRequest,
-    db: SessionDB,
-):
-
+def post_like(obj_in: LikeRequest, db: SessionDB):
     post = db.get(Post, obj_in.post_id)
     if post is None:
         raise HTTPException(
@@ -28,11 +26,21 @@ def post_like(
             detail="Post not found",
         )
 
-    data = obj_in.model_dump()
-    like = Like(**data)
+    user = db.scalar(
+        select(User).where(User.username == obj_in.username)
+    )
+
+    if user is None:
+        user = User(username=obj_in.username)
+        db.add(user)
+        db.flush()
+
+    like = Like(
+        post_id=post.id,
+        user_id=user.id,
+    )
     db.add(like)
     db.commit()
     db.refresh(like)
 
-    response = LikeResponse.model_validate(like)
-    return response
+    return LikeResponse.model_validate(like)

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from models.base import Base
 
 if TYPE_CHECKING:
-    from models.post import Post
+    from models import Post, User
 
 
 class Like(Base):
@@ -16,9 +16,21 @@ class Like(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+
     post_id: Mapped[int] = mapped_column(
         ForeignKey("posts.id", ondelete="CASCADE"),
         index=True,
     )
 
-    post: Mapped[Post] = relationship(back_populates="likes")
+    post: Mapped[Post] = relationship(
+        "Post",
+        back_populates="likes",
+    )
+    user: Mapped[User] = relationship(
+        "User",
+        back_populates="likes",
+    )

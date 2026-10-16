@@ -1,13 +1,10 @@
 from fastapi import APIRouter, HTTPException
+from sqlalchemy import select
+from starlette.status import HTTP_201_CREATED, HTTP_404_NOT_FOUND
 from schemas.view import ViewRequest, ViewResponse
 
-
-from starlette.status import HTTP_201_CREATED, HTTP_404_NOT_FOUND
-
-
 from database.session import SessionDB
-from models import View
-from models import Post
+from models import View, Post, User
 
 router = APIRouter(prefix="/view", tags=["View"])
 
@@ -28,10 +25,18 @@ def post_view(
             detail="Post not found",
         )
 
-    data = obj_in.model_dump()
-    view = View(**data)
+    user = db.scalar(select(User).where(User.username == obj_in.username))
+    if user is None:
+        user = User(username=obj_in.username)
+        db.add(user)
+        db.flush()
+
+    view = View(
+        post_id=post.id,
+        user_id=user.id,
+    )
     db.add(view)
     db.commit()
     db.refresh(view)
-    response = ViewResponse.model_validate(view)
-    return response
+
+    return ViewResponse.model_validate(view)

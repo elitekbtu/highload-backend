@@ -2,6 +2,7 @@ from pydantic import BaseModel, ConfigDict
 
 
 class ViewRequest(BaseModel):
+    username: str
     post_id: int
 
 
