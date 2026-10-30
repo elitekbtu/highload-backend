@@ -1,0 +1,31 @@
+x-postgres: &postgres
+  image: postgres:18-alpine
+  restart: unless-stopped
+  command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+  shm_size: 256m
+  deploy: { resources: { limits: { memory: 1g } } }
+  environment:
+    POSTGRES_USER: app
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+    POSTGRES_DB: counters
+  healthcheck:
+    test: ["CMD", "pg_isready", "-U", "app", "-d", "counters"]
+    interval: 2s
+    retries: 15
+
+services:
+  pg-0:
+    <<: *postgres
+    volumes:
+      - pg-0:/var/lib/postgresql
+      - ../infra/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+
+  pg-1:
+    <<: *postgres
+    volumes:
+      - pg-1:/var/lib/postgresql
+      - ../infra/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+
+volumes:
+  pg-0:
+  pg-1:

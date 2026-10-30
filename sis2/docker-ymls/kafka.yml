@@ -1,0 +1,11 @@
+services:
+  kafka:
+    image: apache/kafka-native:4.1.0
+    restart: unless-stopped
+    deploy: { resources: { limits: { memory: 1g } } }
+    volumes:
+      - ../infra/kafka/server.properties:/mnt/shared/config/server.properties:ro
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9092"]
+      interval: 2s
+      retries: 15

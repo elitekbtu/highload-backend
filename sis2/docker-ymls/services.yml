@@ -1,0 +1,70 @@
+x-app-env: &app-env
+  DATABASE_URLS: postgresql+asyncpg://app:${POSTGRES_PASSWORD:-app}@pg-0:5432/counters,postgresql+asyncpg://app:${POSTGRES_PASSWORD:-app}@pg-1:5432/counters
+  REDIS_URL: redis://redis:6379/0
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  KAFKA_TOPIC: counter-events
+  JWT_SECRET: ${JWT_SECRET:-change-me-jwt}
+
+x-uvicorn: &uvicorn ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+
+x-http-healthcheck: &http-healthcheck
+  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+  interval: 5s
+  retries: 10
+
+services:
+  write_service:
+    build:
+      context: ..
+      dockerfile: docker-ymls/dockerfiles/python.Dockerfile
+      args: { PACKAGE: write-service, SRC: services/write_service }
+    command: *uvicorn
+    healthcheck: *http-healthcheck
+    restart: unless-stopped
+    deploy: { resources: { limits: { memory: 256m } } }
+    environment:
+      <<: *app-env
+      VIEW_TOKEN_SECRET: ${VIEW_TOKEN_SECRET:-change-me}
+    depends_on:
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+
+  read_service:
+    build:
+      context: ..
+      dockerfile: docker-ymls/dockerfiles/python.Dockerfile
+      args: { PACKAGE: read-service, SRC: services/read_service }
+    command: *uvicorn
+    healthcheck: *http-healthcheck
+    restart: unless-stopped
+    deploy: { resources: { limits: { memory: 256m } } }
+    environment: *app-env
+    depends_on:
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+
+  aggregator:
+    build:
+      context: ..
+      dockerfile: docker-ymls/dockerfiles/python.Dockerfile
+      args: { PACKAGE: aggregator, SRC: services/aggregator }
+    command: ["python", "-m", "app.main"]
+    restart: unless-stopped
+    deploy: { resources: { limits: { memory: 256m } } }
+    environment: *app-env
+    depends_on:
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: docker-ymls/dockerfiles/python.Dockerfile
+      args: { PACKAGE: migrations, SRC: infra/postgres }
+    command: ["alembic", "upgrade", "head"]
+    deploy: { resources: { limits: { memory: 128m } } }
+    environment: *app-env
+    depends_on:
+      pg-0: { condition: service_healthy }
+      pg-1: { condition: service_healthy }

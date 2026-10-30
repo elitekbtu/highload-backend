@@ -19,7 +19,6 @@ source = { virtual = "services/aggregator" }
 dependencies = [
     { name = "aiokafka" },
     { name = "asyncpg" },
-    { name = "pydantic-settings" },
     { name = "redis" },
     { name = "shared" },
 ]
@@ -28,7 +27,6 @@ dependencies = [
 requires-dist = [
     { name = "aiokafka", specifier = ">=0.15.0" },
     { name = "asyncpg", specifier = ">=0.32.0" },
-    { name = "pydantic-settings", specifier = ">=2.16.2" },
     { name = "redis", specifier = ">=8.1.0" },
     { name = "shared", editable = "shared" },
 ]
@@ -855,7 +853,6 @@ dependencies = [
     { name = "asyncpg" },
     { name = "cachetools" },
     { name = "fastapi" },
-    { name = "pydantic-settings" },
     { name = "redis" },
     { name = "shared" },
     { name = "uvicorn", extra = ["standard"] },
@@ -866,7 +863,6 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.32.0" },
     { name = "cachetools", specifier = ">=7.2.7" },
     { name = "fastapi", specifier = ">=0.162.0" },
-    { name = "pydantic-settings", specifier = ">=2.16.2" },
     { name = "redis", specifier = ">=8.1.0" },
     { name = "shared", editable = "shared" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
@@ -887,12 +883,16 @@ version = "0.1.0"
 source = { editable = "shared" }
 dependencies = [
     { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyjwt" },
     { name = "sqlalchemy", extra = ["asyncio"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "pydantic", specifier = ">=2.14.2" },
+    { name = "pydantic-settings", specifier = ">=2.16.2" },
+    { name = "pyjwt", specifier = ">=2.15.1" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.1.6" },
 ]
 
@@ -1276,8 +1276,6 @@ source = { virtual = "services/write_service" }
 dependencies = [
     { name = "aiokafka" },
     { name = "fastapi" },
-    { name = "pydantic-settings" },
-    { name = "pyjwt" },
     { name = "redis" },
     { name = "shared" },
     { name = "uvicorn", extra = ["standard"] },
@@ -1287,8 +1285,6 @@ dependencies = [
 requires-dist = [
     { name = "aiokafka", specifier = ">=0.15.0" },
     { name = "fastapi", specifier = ">=0.162.0" },
-    { name = "pydantic-settings", specifier = ">=2.16.2" },
-    { name = "pyjwt", specifier = ">=2.15.1" },
     { name = "redis", specifier = ">=8.1.0" },
     { name = "shared", editable = "shared" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },

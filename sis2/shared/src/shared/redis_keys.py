@@ -1,5 +1,6 @@
 LIKES_FIELD = "likes"
 VIEWS_FIELD = "views"
+OFFSET_FIELD = "offset"
 VIEW_DEDUP_TTL_SECONDS = 3600
 
 

@@ -1,5 +1,4 @@
 import asyncio
-import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -7,13 +6,14 @@ from sqlalchemy import pool, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from shared.models import Base
+from shared.settings import DatabaseSettings
 
 config = context.config
 if config.config_file_name:
     fileConfig(config.config_file_name)
 target_metadata = Base.metadata
 
-SHARD_URLS = os.environ["DATABASE_URLS"].split(",")
+SHARD_URLS = DatabaseSettings().database_urls
 
 
 def run_migrations_offline():
