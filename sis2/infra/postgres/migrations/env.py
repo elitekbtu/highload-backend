@@ -29,20 +29,14 @@ def run_migrations_offline():
 
 
 def do_run_migrations(connection):
-    context.configure(
-        connection=connection, target_metadata=target_metadata, compare_type=True
-    )
+    context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
     with context.begin_transaction():
         connection.execute(text("SELECT pg_advisory_xact_lock(731215001)"))
         context.run_migrations()
 
 
 async def run_async_migrations():
-    urls = (
-        SHARD_URLS[:1]
-        if getattr(config.cmd_opts, "autogenerate", False)
-        else SHARD_URLS
-    )
+    urls = SHARD_URLS[:1] if getattr(config.cmd_opts, "autogenerate", False) else SHARD_URLS
     for url in urls:
         connectable = create_async_engine(url, poolclass=pool.NullPool)
         try:

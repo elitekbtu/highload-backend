@@ -18,9 +18,7 @@ class CounterEvent(BaseModel):
     type: EventType
     post_id: int
     user_id: int
-    timestamp: int = Field(
-        default_factory=lambda: int(datetime.now(timezone.utc).timestamp() * 1000)
-    )
+    timestamp: int = Field(default_factory=lambda: int(datetime.now(timezone.utc).timestamp() * 1000))
 
     @property
     def kafka_key(self) -> bytes:

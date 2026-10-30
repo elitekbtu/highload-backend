@@ -14,6 +14,10 @@ members = ["shared", "services/write_service", "services/read_service", "service
 [tool.uv.sources]
 shared = { workspace = true }
 
+[tool.ruff]
+line-length = 120
+extend-exclude = ["shared/src/shared/proto", "infra/postgres/migrations/versions"]
+
 [dependency-groups]
 dev = [
     "grpcio-tools>=1.85.1",
