@@ -297,7 +297,8 @@ flowchart LR
 ### Проверка руками
 
 ```bash
-TOKEN=$(uv run --with pyjwt python -c "import jwt; print(jwt.encode({'sub': '7'}, 'change-me-jwt', algorithm='HS256'))")
+set -a; source .env; set +a
+TOKEN=$(uv run -q python -c "import jwt, os; print(jwt.encode({'sub': '7'}, os.environ['JWT_SECRET'], algorithm='HS256'))")
 H="Authorization: Bearer $TOKEN"
 
 curl -i -X PUT -H "$H" localhost:8080/api/v1/posts/42/like
