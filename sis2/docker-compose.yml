@@ -43,8 +43,7 @@ services:
     environment: *app-env
     depends_on:
       redis: { condition: service_healthy }
-      pg-0: { condition: service_healthy }
-      pg-1: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
 
   aggregator:
     build: { context: ., dockerfile: services/aggregator/Dockerfile }
@@ -53,6 +52,13 @@ services:
     depends_on:
       redis: { condition: service_healthy }
       kafka: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+
+  migrate:
+    build: { context: ., dockerfile: infra/postgres/Dockerfile }
+    deploy: { resources: { limits: { memory: 128m } } }
+    environment: *app-env
+    depends_on:
       pg-0: { condition: service_healthy }
       pg-1: { condition: service_healthy }
 

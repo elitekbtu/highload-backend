@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 [manifest]
 members = [
     "aggregator",
+    "migrations",
     "read-service",
     "shared",
     "sis2",
@@ -562,6 +563,23 @@ wheels = [
 ]
 
 [[package]]
+name = "migrations"
+version = "0.1.0"
+source = { virtual = "infra/postgres" }
+dependencies = [
+    { name = "alembic" },
+    { name = "asyncpg" },
+    { name = "shared" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = ">=1.20.1" },
+    { name = "asyncpg", specifier = ">=0.32.0" },
+    { name = "shared", editable = "shared" },
+]
+
+[[package]]
 name = "opentelemetry-api"
 version = "1.45.2"
 source = { registry = "https://pypi.org/simple" }
@@ -885,7 +903,6 @@ source = { virtual = "." }
 
 [package.dev-dependencies]
 dev = [
-    { name = "alembic" },
     { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -895,7 +912,6 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "alembic", specifier = ">=1.20.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "pytest", specifier = ">=9.2.0" },
     { name = "pytest-asyncio", specifier = ">=1.4.1" },

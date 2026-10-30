@@ -3,4 +3,5 @@
 **/tests
 .env
 load
-infra
+infra/kafka
+infra/redis
