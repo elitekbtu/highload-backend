@@ -1,0 +1,7 @@
+## kill redis-1 (current master)
+killed redis-1 at 3.3s
+like:  {'OK': 300}
+read:  {'OK': 96, 'DEADLINE_EXCEEDED': 4}
+errors between 3.8s and 4.1s
+likes counted 300, sent 300, confirmed 300
+lost or duplicated: none

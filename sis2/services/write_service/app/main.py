@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from redis.asyncio import Redis
+from shared.redis_client import create_redis
 
 from app.config import get_settings
 from app.routes import likes, views
@@ -15,7 +15,7 @@ from app.services.view_token import ViewTokens
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    redis = Redis.from_url(settings.redis_url)
+    redis = create_redis(settings)
     publisher = EventPublisher(settings)
     await publisher.start()
     app.state.publisher = publisher

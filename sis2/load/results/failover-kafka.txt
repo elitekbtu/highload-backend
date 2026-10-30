@@ -1,0 +1,7 @@
+## kill kafka-2
+killed kafka-2 at 3.2s
+like:  {'OK': 242, 'DEADLINE_EXCEEDED': 58}
+read:  {'OK': 100}
+errors between 4.2s and 6.2s
+likes counted 300, sent 300, confirmed 242
+lost or duplicated: none

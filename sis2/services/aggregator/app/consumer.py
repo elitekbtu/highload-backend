@@ -17,7 +17,7 @@ async def ensure_topic(settings: Settings) -> None:
     try:
         if settings.kafka_topic not in await admin.list_topics():
             await admin.create_topics(
-                [NewTopic(settings.kafka_topic, settings.kafka_topic_partitions, replication_factor=1)]
+                [NewTopic(settings.kafka_topic, settings.kafka_topic_partitions, replication_factor=settings.kafka_replication_factor)]
             )
     finally:
         await admin.close()

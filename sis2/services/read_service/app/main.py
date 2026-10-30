@@ -1,8 +1,8 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from redis.asyncio import Redis
 from shared.db import ShardedDatabase
+from shared.redis_client import create_redis
 
 from app.config import get_settings
 from app.routes import counters
@@ -15,7 +15,7 @@ from app.services.local_cache import LocalCache
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    redis = Redis.from_url(settings.redis_url)
+    redis = create_redis(settings)
     db = ShardedDatabase(settings.database_urls, pool_size=settings.db_pool_size, max_overflow=0, pool_pre_ping=True)
     app.state.counters = CountersService(
         db,

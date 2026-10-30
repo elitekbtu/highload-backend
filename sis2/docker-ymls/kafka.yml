@@ -1,11 +1,36 @@
+x-kafka: &kafka
+  image: apache/kafka-native:4.1.0
+  restart: unless-stopped
+  deploy: { resources: { limits: { memory: 768m } } }
+  volumes:
+    - ../infra/kafka/server.properties:/mnt/shared/config/server.properties:ro
+  healthcheck:
+    test: ["CMD", "nc", "-z", "localhost", "9092"]
+    interval: 2s
+    retries: 30
+
+x-kafka-env: &kafka-env
+  CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+  KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+
 services:
-  kafka:
-    image: apache/kafka-native:4.1.0
-    restart: unless-stopped
-    deploy: { resources: { limits: { memory: 1g } } }
-    volumes:
-      - ../infra/kafka/server.properties:/mnt/shared/config/server.properties:ro
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "9092"]
-      interval: 2s
-      retries: 15
+  kafka-1:
+    <<: *kafka
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092
+
+  kafka-2:
+    <<: *kafka
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 2
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092
+
+  kafka-3:
+    <<: *kafka
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9092

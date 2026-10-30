@@ -1,6 +1,6 @@
 # SIS 2 — счётчик лайков и просмотров
 
-Стек: Python 3.12, FastAPI, aiokafka, redis-py, SQLAlchemy (asyncpg), Alembic, nginx, Kafka (KRaft), Redis, PostgreSQL ×2.
+Стек: Python 3.12, FastAPI, aiokafka, redis-py, SQLAlchemy (asyncpg), Alembic, nginx, Kafka (KRaft) ×3, Redis + реплика + Sentinel ×3, PostgreSQL ×2.
 Монорепо на `uv` workspace: `shared` + три сервиса + миграции.
 
 ## Архитектура
@@ -20,8 +20,8 @@ flowchart LR
     end
 
     subgraph data[Хранилища]
-        kafka[("Kafka<br/>topic counter-events<br/>12 партиций, key = post_id")]
-        redis[("Redis<br/>кэш счётчиков + дедуп просмотров")]
+        kafka[("Kafka ×3<br/>topic counter-events<br/>12 партиций, key = post_id<br/>RF 3, min ISR 2")]
+        redis[("Redis master + replica<br/>Sentinel ×3<br/>кэш счётчиков + дедуп просмотров")]
         pg0[("pg-0")]
         pg1[("pg-1")]
     end
@@ -272,13 +272,24 @@ flowchart LR
     pg1[(pg-1)] --> migrate
     migrate -- completed --> rs[read_service]
     migrate -- completed --> agg[aggregator]
-    redis[(redis)] --> rs & ws[write_service] & agg
-    kafka[(kafka)] --> ws & agg
+    redis0[(redis-0)] --> redis1[(redis-1)] & sentinel[(sentinel ×3)]
+    sentinel --> rs & ws[write_service] & agg
+    kafka[(kafka-1..3)] --> ws & agg
     ws -- healthy --> gw[gateway :8080]
     rs -- healthy --> gw
 ```
 
-Наружу открыты только `:8080` (REST) и `:8081` (gRPC). Compose собран из файлов в [docker-ymls](docker-ymls), все Python-образы — из одного [python.Dockerfile](docker-ymls/dockerfiles/python.Dockerfile) с аргументами `PACKAGE` и `SRC`.
+Наружу открыты только `:8080` (REST) и `:8081` (gRPC).
+
+### Отказоустойчивость
+
+| Компонент | Как устроено | Что будет при падении узла |
+|---|---|---|
+| Kafka | 3 узла KRaft (broker + controller), у топика 12 партиций с фактором репликации 3, `min.insync.replicas=2`, producer с `acks=all` | Кворум контроллеров (2 из 3) выбирает новых лидеров партиций примерно за 3 с (`broker.session.timeout.ms=3000`). События не теряются |
+| Redis | `redis-0` мастер, `redis-1` реплика, 3 Sentinel с кворумом 2 | Sentinel повышает реплику через ~2 с (`down-after-milliseconds 2000`), сервисы переподключаются к новому мастеру через Sentinel. Пока мастера нет, чтение идёт в Postgres, дедуп пропускает запросы, aggregator ретраит |
+
+Сервисы подключаются к Redis через Sentinel ([redis_client.py](shared/src/shared/redis_client.py)) с таймаутом сокета 0.5 с, к Kafka — по списку всех брокеров.
+Проверка под нагрузкой — [load/failover.py](load/failover.py): `uv run python load/failover.py kafka-2` или `redis-0` убивает узел посреди потока лайков и сверяет, что ничего не потеряно и не задвоено. Compose собран из файлов в [docker-ymls](docker-ymls), все Python-образы — из одного [python.Dockerfile](docker-ymls/dockerfiles/python.Dockerfile) с аргументами `PACKAGE` и `SRC`.
 
 ### Проверка руками
 
@@ -299,7 +310,7 @@ curl -s -H "$H" 'localhost:8080/api/v1/counters?post_ids=42,43' | jq
 
 ## Настройки
 
-Общие переменные (из [services.yml](docker-ymls/services.yml)): `DATABASE_URLS` (через запятую), `REDIS_URL`, `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_TOPIC`, `JWT_SECRET`.
+Общие переменные (из [services.yml](docker-ymls/services.yml)): `DATABASE_URLS` (через запятую), `REDIS_SENTINELS` и `REDIS_MASTER_NAME` (или `REDIS_URL` без Sentinel), `KAFKA_BOOTSTRAP_SERVERS` (через запятую), `KAFKA_TOPIC`, `JWT_SECRET`.
 
 | Сервис | Переменная | По умолчанию |
 |---|---|---|
@@ -313,7 +324,7 @@ curl -s -H "$H" 'localhost:8080/api/v1/counters?post_ids=42,43' | jq
 | read | `LOCAL_CACHE_TTL_SECONDS` / `LOCAL_CACHE_SIZE` | 1.0 / 100 000 |
 | read | `MAX_BATCH_POSTS` | 100 |
 | read | `LIKED_BY_TIMEOUT_SECONDS` — сколько ждать шард для `liked_by_me` | 0.5 |
-| aggregator | `KAFKA_GROUP_ID` / `KAFKA_TOPIC_PARTITIONS` | aggregator / 12 |
+| aggregator | `KAFKA_GROUP_ID` / `KAFKA_TOPIC_PARTITIONS` / `KAFKA_REPLICATION_FACTOR` | aggregator / 12 / 3 |
 | aggregator | `BATCH_WINDOW_SECONDS` / `BATCH_MAX_EVENTS` | 1.0 / 10 000 |
 | aggregator | `FLUSH_INTERVAL_SECONDS` | 10.0 |
 | aggregator | `RETRY_BACKOFF_SECONDS` | 1.0 |

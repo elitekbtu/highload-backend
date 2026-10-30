@@ -6,8 +6,8 @@ from functools import partial
 
 from aiokafka import AIOKafkaConsumer, ConsumerRebalanceListener
 from cachetools import LRUCache
-from redis.asyncio import Redis
 from shared.db import ShardedDatabase
+from shared.redis_client import create_redis
 
 from app.batcher import Batch
 from app.config import get_settings
@@ -49,7 +49,7 @@ async def run() -> None:
     settings = get_settings()
     await ensure_topic(settings)
     db = ShardedDatabase(settings.database_urls, pool_size=settings.db_pool_size, pool_pre_ping=True)
-    redis = Redis.from_url(settings.redis_url)
+    redis = create_redis(settings)
     flusher = Flusher(db, redis, settings.flushed_views_size)
     consumer = create_consumer(settings)
     consumer.subscribe([settings.kafka_topic], listener=CheckpointOnRevoke(flusher, consumer))

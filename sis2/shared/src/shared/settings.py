@@ -23,7 +23,10 @@ class DatabaseSettings(BaseSettings):
 
 
 class RedisSettings(BaseSettings):
-    redis_url: str
+    redis_url: str = "redis://localhost:6379/0"
+    redis_sentinels: str = ""
+    redis_master_name: str = "counters"
+    redis_timeout_seconds: float = 0.5
 
 
 class KafkaSettings(BaseSettings):

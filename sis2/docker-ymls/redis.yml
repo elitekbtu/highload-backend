@@ -1,12 +1,39 @@
+x-redis: &redis
+  image: redis:7.4-alpine
+  restart: unless-stopped
+  deploy: { resources: { limits: { memory: 640m } } }
+  volumes:
+    - ../infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+  healthcheck:
+    test: ["CMD", "redis-cli", "ping"]
+    interval: 2s
+    retries: 15
+
+x-sentinel: &sentinel
+  image: redis:7.4-alpine
+  restart: unless-stopped
+  command: ["sh", "-c", "cp /etc/redis/sentinel.conf /data/sentinel.conf && exec redis-sentinel /data/sentinel.conf"]
+  deploy: { resources: { limits: { memory: 32m } } }
+  volumes:
+    - ../infra/redis/sentinel.conf:/etc/redis/sentinel.conf:ro
+  healthcheck:
+    test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+    interval: 2s
+    retries: 15
+  depends_on:
+    redis-0: { condition: service_healthy }
+
 services:
-  redis:
-    image: redis:7.4-alpine
-    restart: unless-stopped
-    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
-    deploy: { resources: { limits: { memory: 640m } } }
-    volumes:
-      - ../infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 2s
-      retries: 15
+  redis-0:
+    <<: *redis
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--replica-announce-ip", "redis-0"]
+
+  redis-1:
+    <<: *redis
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--replica-announce-ip", "redis-1", "--replicaof", "redis-0", "6379"]
+    depends_on:
+      redis-0: { condition: service_healthy }
+
+  sentinel-1: *sentinel
+  sentinel-2: *sentinel
+  sentinel-3: *sentinel
