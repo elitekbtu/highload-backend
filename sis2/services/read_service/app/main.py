@@ -6,6 +6,7 @@ from shared.db import ShardedDatabase
 
 from app.config import get_settings
 from app.routes import counters
+from app.rpc import create_server
 from app.services.cache import CounterCache
 from app.services.counters import CountersService
 from app.services.local_cache import LocalCache
@@ -17,11 +18,17 @@ async def lifespan(app: FastAPI):
     redis = Redis.from_url(settings.redis_url)
     db = ShardedDatabase(settings.database_urls, pool_size=settings.db_pool_size, max_overflow=0, pool_pre_ping=True)
     app.state.counters = CountersService(
-        db, CounterCache(redis), LocalCache(settings.local_cache_size, settings.local_cache_ttl_seconds)
+        db,
+        CounterCache(redis),
+        LocalCache(settings.local_cache_size, settings.local_cache_ttl_seconds),
+        settings.liked_by_timeout_seconds,
     )
+    grpc_server = create_server(app.state, settings.grpc_port)
+    await grpc_server.start()
     try:
         yield
     finally:
+        await grpc_server.stop(grace=5)
         await db.dispose()
         await redis.aclose()
 

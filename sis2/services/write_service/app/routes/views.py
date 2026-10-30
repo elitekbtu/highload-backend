@@ -1,11 +1,11 @@
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
-from shared.events import CounterEvent, EventType
 
-from app.deps import PostId, UserIdDep
+from app.deps import IdempotencyKey, PostId, UserIdDep
 from app.services.dedup import DedupDep
 from app.services.publisher import PublisherDep
 from app.services.view_token import InvalidViewToken, ViewTokensDep
+from app.services.views import count_view
 
 router = APIRouter(prefix="/api/v1/posts", tags=["views"])
 
@@ -28,6 +28,7 @@ async def view_finished(
     post_id: PostId,
     body: ViewFinishedIn,
     user_id: UserIdDep,
+    event_id: IdempotencyKey,
     tokens: ViewTokensDep,
     dedup: DedupDep,
     publisher: PublisherDep,
@@ -37,11 +38,5 @@ async def view_finished(
     except InvalidViewToken as exc:
         raise HTTPException(400, str(exc)) from exc
 
-    if not await dedup.first_view(post_id, user_id):
-        return Response(status_code=200)
-    try:
-        await publisher.publish(CounterEvent(type=EventType.VIEW, post_id=post_id, user_id=user_id))
-    except HTTPException:
-        await dedup.forget(post_id, user_id)
-        raise
-    return Response(status_code=202)
+    counted = await count_view(post_id, user_id, event_id, dedup, publisher)
+    return Response(status_code=202 if counted else 200)

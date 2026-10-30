@@ -11,13 +11,18 @@ package = false
 [tool.uv.workspace]
 members = ["shared", "services/write_service", "services/read_service", "services/aggregator", "infra/postgres"]
 
+[tool.uv.sources]
+shared = { workspace = true }
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = ["integration: requires the Docker Compose services"]
 
 [dependency-groups]
 dev = [
+    "grpcio-tools>=1.85.1",
     "httpx>=0.28.1",
     "pytest>=9.2.0",
     "pytest-asyncio>=1.4.1",
+    "shared",
 ]

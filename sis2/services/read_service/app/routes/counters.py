@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from app.config import get_settings
 from app.deps import PostId, UserIdDep
-from app.services.counters import CountersServiceDep, PostCounters
+from app.services.counters import CountersServiceDep, InvalidPostIds, PostCounters, normalize_post_ids
 
 router = APIRouter(prefix="/api/v1", tags=["counters"])
 
@@ -16,14 +16,13 @@ class CountersOut(BaseModel):
 
 def parse_post_ids(raw: str) -> list[int]:
     try:
-        post_ids = list(dict.fromkeys(int(part) for part in raw.split(",") if part.strip()))
+        post_ids = [int(part) for part in raw.split(",") if part.strip()]
     except ValueError as exc:
         raise HTTPException(400, "post_ids must be comma separated integers") from exc
-    if not post_ids or any(not 0 < post_id < 2**63 for post_id in post_ids):
-        raise HTTPException(400, "post_ids must be positive integers")
-    if len(post_ids) > get_settings().max_batch_posts:
-        raise HTTPException(400, f"at most {get_settings().max_batch_posts} post_ids per request")
-    return post_ids
+    try:
+        return normalize_post_ids(post_ids, get_settings().max_batch_posts)
+    except InvalidPostIds as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.get("/posts/{post_id}/counters")

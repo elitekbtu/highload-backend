@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Kafka event schema, DB models and sharding shared by all services"
 requires-python = ">=3.12"
 dependencies = [
+    "grpcio>=1.85.1",
+    "protobuf>=7.36.2",
     "pydantic>=2.14.2",
     "pydantic-settings>=2.16.2",
     "pyjwt>=2.15.1",

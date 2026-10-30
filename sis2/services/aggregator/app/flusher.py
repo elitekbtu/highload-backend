@@ -1,12 +1,13 @@
 import logging
 from collections import Counter
 
+from cachetools import LRUCache
 from redis.asyncio import Redis
 from shared.db import ShardedDatabase
 from shared.events import EventType
 from shared.models import Like, PostCounter
-from shared.redis_keys import LIKES_FIELD, OFFSET_FIELD, VIEWS_FIELD, counter_key
-from sqlalchemy import delete, func, tuple_
+from shared.redis_keys import LIKES_FIELD, VIEWS_FIELD, counter_key
+from sqlalchemy import delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -14,39 +15,21 @@ from app.batcher import Batch
 
 logger = logging.getLogger(__name__)
 
-UPDATE_COUNTER = f"""
-if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
-if ARGV[1] ~= '' then redis.call('HSET', KEYS[1], '{LIKES_FIELD}', ARGV[1]) end
-local applied = tonumber(redis.call('HGET', KEYS[1], '{OFFSET_FIELD}') or '-1')
-local views, last = 0, applied
-for i = 2, #ARGV do
-  local offset = tonumber(ARGV[i])
-  if offset > applied then
-    views = views + 1
-    if offset > last then last = offset end
-  end
-end
-if views > 0 then
-  redis.call('HINCRBY', KEYS[1], '{VIEWS_FIELD}', views)
-  redis.call('HSET', KEYS[1], '{OFFSET_FIELD}', last)
-end
-return 1
-"""
-
 CHUNK_SIZE = 5000
 
 
 class Flusher:
-    def __init__(self, db: ShardedDatabase, redis: Redis):
+    def __init__(self, db: ShardedDatabase, redis: Redis, flushed_views_size: int):
         self.db = db
         self.redis = redis
-        self.update_counter = redis.register_script(UPDATE_COUNTER)
         self.pending_views: Counter[int] = Counter()
+        self.flushed_views: LRUCache[int, int] = LRUCache(flushed_views_size)
 
     async def apply(self, batch: Batch) -> None:
         likes = await self.apply_likes(batch.like_changes) if batch.like_changes else {}
-        await self.update_cache(likes, batch.view_offsets)
-        self.pending_views.update({post_id: len(offsets) for post_id, offsets in batch.view_offsets.items()})
+        views = await self.total_views(batch.views) if batch.views else {}
+        await self.update_cache(likes, views)
+        self.pending_views.update(batch.views)
 
     async def apply_likes(self, changes: dict[tuple[int, int], EventType]) -> dict[int, int]:
 
@@ -83,15 +66,19 @@ class Flusher:
             likes |= shard_likes
         return likes
 
-    async def update_cache(self, likes: dict[int, int], view_offsets: dict[int, list[int]]) -> None:
+    async def total_views(self, batch_views: Counter[int]) -> dict[int, int]:
+        flushed = {post_id: self.flushed_views[post_id] for post_id in batch_views if post_id in self.flushed_views}
+        if missing := [post_id for post_id in batch_views if post_id not in flushed]:
+            for shard_views in await self.db.map_shards(missing, load_views):
+                flushed |= shard_views
+            self.flushed_views.update({post_id: flushed[post_id] for post_id in missing})
+        return {post_id: flushed[post_id] + self.pending_views[post_id] + n for post_id, n in batch_views.items()}
+
+    async def update_cache(self, likes: dict[int, int], views: dict[int, int]) -> None:
         async with self.redis.pipeline(transaction=False) as pipe:
-            for post_id in likes.keys() | view_offsets.keys():
-                likes_value = likes.get(post_id)
-                await self.update_counter(
-                    keys=[counter_key(post_id)],
-                    args=["" if likes_value is None else likes_value, *view_offsets.get(post_id, [])],
-                    client=pipe,
-                )
+            for post_id in likes.keys() | views.keys():
+                fields = {LIKES_FIELD: likes.get(post_id), VIEWS_FIELD: views.get(post_id)}
+                pipe.hset(counter_key(post_id), mapping={k: v for k, v in fields.items() if v is not None})
             await pipe.execute()
 
     async def flush_views(self) -> None:
@@ -99,32 +86,50 @@ class Flusher:
             return
         pending, self.pending_views = self.pending_views, Counter()
 
-        async def flush_shard(engine: AsyncEngine, post_ids: list[int]) -> Exception | None:
+        async def flush_shard(engine: AsyncEngine, post_ids: list[int]) -> dict[int, int] | Exception:
             post_ids.sort()
             try:
-                await write_shard(engine, post_ids)
+                return await write_shard(engine, post_ids)
             except Exception as exc:
                 self.pending_views.update({post_id: pending[post_id] for post_id in post_ids})
                 return exc
-            return None
 
-        async def write_shard(engine: AsyncEngine, post_ids: list[int]) -> None:
+        async def write_shard(engine: AsyncEngine, post_ids: list[int]) -> dict[int, int]:
+            written: dict[int, int] = {}
             async with engine.begin() as conn:
                 for start in range(0, len(post_ids), CHUNK_SIZE):
                     chunk = post_ids[start : start + CHUNK_SIZE]
                     stmt = insert(PostCounter).values(
                         [{"post_id": post_id, "views_count": pending[post_id]} for post_id in chunk]
                     )
-                    await conn.execute(
+                    rows = await conn.execute(
                         stmt.on_conflict_do_update(
                             index_elements=[PostCounter.post_id],
                             set_={
                                 "views_count": PostCounter.views_count + stmt.excluded.views_count,
                                 "updated_at": func.now(),
                             },
-                        )
+                        ).returning(PostCounter.post_id, PostCounter.views_count)
                     )
+                    written.update({row.post_id: row.views_count for row in rows})
+            return written
 
-        if errors := [error for error in await self.db.map_shards(pending, flush_shard) if error]:
+        flushed: dict[int, int] = {}
+        errors: list[Exception] = []
+        for result in await self.db.map_shards(pending, flush_shard):
+            if isinstance(result, Exception):
+                errors.append(result)
+            else:
+                flushed |= result
+        self.flushed_views.update(flushed)
+        await self.update_cache({}, flushed)
+        if errors:
             raise errors[0]
         logger.info("flushed views of %d posts", len(pending))
+
+
+async def load_views(engine: AsyncEngine, post_ids: list[int]) -> dict[int, int]:
+    stmt = select(PostCounter.post_id, PostCounter.views_count).where(PostCounter.post_id.in_(post_ids))
+    async with engine.connect() as conn:
+        rows = (await conn.execute(stmt)).all()
+    return {post_id: 0 for post_id in post_ids} | {row.post_id: row.views_count for row in rows}

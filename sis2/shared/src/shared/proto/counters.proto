@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package counters.v1;
+
+service CounterWriteService {
+  rpc Like(LikeRequest) returns (WriteReply);
+  rpc Unlike(LikeRequest) returns (WriteReply);
+  rpc ViewStarted(ViewStartedRequest) returns (ViewStartedReply);
+  rpc ViewFinished(ViewFinishedRequest) returns (WriteReply);
+}
+
+service CounterReadService {
+  rpc GetCounters(GetCountersRequest) returns (PostCounters);
+  rpc BatchGetCounters(BatchGetCountersRequest) returns (BatchGetCountersReply);
+}
+
+message LikeRequest {
+  int64 post_id = 1;
+  string idempotency_key = 2;
+}
+
+message ViewStartedRequest {
+  int64 post_id = 1;
+}
+
+message ViewStartedReply {
+  string view_token = 1;
+}
+
+message ViewFinishedRequest {
+  int64 post_id = 1;
+  string view_token = 2;
+  string idempotency_key = 3;
+}
+
+message WriteReply {
+  bool already_counted = 1;
+}
+
+message GetCountersRequest {
+  int64 post_id = 1;
+}
+
+message BatchGetCountersRequest {
+  repeated int64 post_ids = 1;
+}
+
+message PostCounters {
+  int64 post_id = 1;
+  int64 likes = 2;
+  int64 views = 3;
+  bool liked_by_me = 4;
+}
+
+message BatchGetCountersReply {
+  repeated PostCounters counters = 1;
+}

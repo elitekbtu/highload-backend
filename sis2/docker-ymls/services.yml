@@ -25,6 +25,7 @@ services:
     environment:
       <<: *app-env
       VIEW_TOKEN_SECRET: ${VIEW_TOKEN_SECRET:-change-me}
+      CHAOS_ACK_LOSS_RATE: ${CHAOS_ACK_LOSS_RATE:-0}
     depends_on:
       redis: { condition: service_healthy }
       kafka: { condition: service_healthy }

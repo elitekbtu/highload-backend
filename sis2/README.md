@@ -10,7 +10,7 @@ flowchart LR
     client([Клиент])
 
     subgraph edge[Edge]
-        gw["gateway<br/>nginx :8080<br/>rate limit 50 r/s на IP"]
+        gw["gateway<br/>nginx :8080 REST, :8081 gRPC<br/>rate limit 50 r/s на IP"]
     end
 
     subgraph app[Сервисы]
@@ -35,7 +35,7 @@ flowchart LR
 
     kafka --> agg
     agg -- "лайки сразу,<br/>просмотры раз в 10 с" --> pg0 & pg1
-    agg -- "Lua: обновить<br/>существующий ключ" --> redis
+    agg -- "HSET абсолютных<br/>значений" --> redis
 
     rs -- "HMGET / HSETNX" --> redis
     rs -- "промах кэша,<br/>liked_by_me" --> pg0 & pg1
@@ -46,7 +46,7 @@ flowchart LR
 
 | Компонент | Код | Роль |
 |---|---|---|
-| gateway | [services/gateway/nginx.conf](services/gateway/nginx.conf) | Единственная точка входа, роутинг по URL, лимит 50 r/s + burst 100 на IP (`429`) |
+| gateway | [services/gateway/nginx.conf](services/gateway/nginx.conf) | Единственная точка входа: REST на `:8080`, gRPC (h2c) на `:8081`, лимит 50 r/s + burst 100 на IP (`429`) |
 | write_service | [services/write_service](services/write_service) | Аутентификация, токены просмотров, дедуп, публикация событий |
 | read_service | [services/read_service](services/read_service) | Отдаёт счётчики: L1 → Redis → Postgres |
 | aggregator | [services/aggregator](services/aggregator) | Читает Kafka батчами, пишет в шарды Postgres и обновляет Redis |
@@ -67,6 +67,18 @@ flowchart LR
 | `GET` | `/api/v1/counters?post_ids=1,2,3` | read | `{"counters": [...]}`, до 100 id |
 
 Если Kafka недоступна, write-эндпоинты отвечают `503` — клиент повторяет запрос.
+Необязательный заголовок `Idempotency-Key: <UUID>` у записи делает повтор безопасным: событие получит тот же `event_id`, и aggregator посчитает его один раз.
+
+### gRPC
+
+Те же операции доступны по gRPC через `:8081`: `CounterWriteService` (`Like`, `Unlike`, `ViewStarted`, `ViewFinished`) и `CounterReadService` (`GetCounters`, `BatchGetCounters`).
+Контракт — [counters.proto](shared/src/shared/proto/counters.proto), код генерирует `make proto`. gRPC-сервер запускается в `lifespan` того же процесса, что и FastAPI (порт `50051`), и работает через те же сервисные объекты.
+
+- JWT передаётся в metadata `authorization`, ключ идемпотентности — в поле `idempotency_key`.
+- Сервер ограничивает вызовы Redis, Kafka и Postgres оставшимся до дедлайна клиента временем и отвечает `DEADLINE_EXCEEDED`.
+- Клиент ([load/client.py](load/client.py)) повторяет `UNAVAILABLE` через `retryPolicy` с экспоненциальным backoff и `retryThrottling`.
+
+Обоснование выбора протокола, схема ретраев и замеры против REST — в [REPORT.md](REPORT.md).
 
 ## Лайк
 
@@ -135,13 +147,14 @@ flowchart TD
     topic --> poll["poll_batch: до 10 000 событий<br/>или окно 1 с"]
     poll --> empty{есть события?}
     empty -- нет --> timer
-    empty -- да --> batch["Batch.from_records:<br/>лайки — последнее событие на (post, user)<br/>просмотры — список offset'ов на post"]
+    empty -- да --> batch["Batch.from_events:<br/>дубли event_id отброшены<br/>лайки — последнее событие на (post, user)<br/>просмотры — число на post"]
     batch --> likes["apply_likes, по шардам, одна транзакция на шард:<br/>INSERT likes ON CONFLICT DO NOTHING RETURNING<br/>DELETE likes RETURNING<br/>UPSERT post_counters.likes_count += delta RETURNING"]
-    likes --> cache["update_cache: Lua-скрипт на каждый post<br/>(только если ключ уже в Redis)"]
+    likes --> total["total_views:<br/>views = сброшено в БД + pending + батч"]
+    total --> cache["update_cache: HSET likes, views<br/>абсолютные значения, ключ создаётся если нет"]
     cache --> pending["pending_views += просмотры батча<br/>(в памяти)"]
     pending --> timer{прошло ≥ 10 с?}
     timer -- нет --> poll
-    timer -- да --> cp["checkpoint:<br/>1. flush_views → UPSERT views_count += n по шардам<br/>2. consumer.commit()"]
+    timer -- да --> cp["checkpoint:<br/>1. flush_views → UPSERT views_count += n RETURNING<br/>и HSET views в Redis<br/>2. consumer.commit()"]
     cp --> poll
 
     likes -. ошибка .-> retry["retry каждую 1 с,<br/>пока не получится"]
@@ -156,15 +169,19 @@ Offset в Kafka коммитится **только после** записи п
 
 - **Лайки** — `likes` с PK `(post_id, user_id)`: повторный `INSERT` ничего не вставит, `RETURNING` вернёт пусто, `delta = 0`. В Redis пишется абсолютное значение `likes_count` из Postgres.
 - **Просмотры в Postgres** — `pending_views` жили в памяти и потерялись вместе с процессом, поэтому повторное чтение запишет их ровно один раз.
-- **Просмотры в Redis** — Lua-скрипт хранит в хэше поле `offset` и прибавляет только события с offset больше сохранённого. Все события поста лежат в одной партиции, так что offset'ы монотонны.
+- **Просмотры в Redis** — aggregator пишет не приращение, а абсолютное значение: `views = сброшено в Postgres + pending + батч`. Сброшенную часть он знает из `RETURNING` при флаше (или читает из БД, LRU на 200k постов). Повторная запись того же значения ничего не ломает, поэтому переигровка после падения безопасна.
+- **Повторная отправка клиентом** (ретрай после потерянного ack) — это новое сообщение, но с тем же `event_id`. Aggregator держит LRU последних `event_id` и пропускает повтор. После рестарта LRU заново заполняется при переигровке с закоммиченного offset.
 
-```lua
--- KEYS[1] = counter:{post_id}, ARGV[1] = likes или '', ARGV[2..] = offset'ы просмотров
-if not EXISTS(key) then return 0 end      -- не греем кэш сами, это делает read_service
-if likes ~= '' then HSET likes end
-views = count(offset > key.offset)
-HINCRBY views; HSET offset = max(offset)
-```
+### Почему кэш не застревает со старым значением
+
+Aggregator записывает `likes` и `views` в Redis всегда, даже если ключа ещё нет. read_service при промахе дописывает из Postgres только **отсутствующие** поля через `HSETNX`. Поэтому:
+
+- если aggregator записал раньше — `HSETNX` ничего не перезапишет;
+- если read_service записал раньше устаревшее значение из БД — aggregator перезапишет его абсолютным.
+
+Просмотры, которые ещё не сброшены в Postgres, сразу попадают в Redis, и чтение из БД их не потеряет. Если ключ вытеснен из Redis и заполнен из БД без несброшенной части, значение исправится при следующем просмотре поста или флаше (≤ 10 с).
+
+При отзыве партиций (rebalance) aggregator забывает кэш сброшенных значений: эти посты теперь пишет другой инстанс.
 
 ## Чтение
 
@@ -188,9 +205,9 @@ flowchart TD
 ```
 
 - L1 гасит горячие посты: при всплеске трафика на один пост Redis получает не больше запроса в секунду на инстанс.
-- `HSETNX` не перезапишет значение, если aggregator успел обновить ключ между чтением из Postgres и заполнением.
+- `HSETNX` дописывает только отсутствующие поля и не перезапишет то, что записал aggregator.
 - Ошибки Redis не валят запрос — сервис деградирует до Postgres.
-- `liked_by_me` всегда читается из Postgres (персональные данные не кэшируются).
+- `liked_by_me` всегда читается из Postgres (персональные данные не кэшируются). Если шард недоступен или не ответил за 0.5 с, для его постов возвращается `liked_by_me = false`, а счётчики по-прежнему отдаются из Redis.
 
 ## Шардирование Postgres
 
@@ -227,7 +244,7 @@ erDiagram
 
 | Redis-ключ | Тип | TTL | Назначение |
 |---|---|---|---|
-| `counter:{post_id}` | hash `likes`, `views`, `offset` | нет, вытеснение `allkeys-lru` (512 МБ) | кэш счётчиков |
+| `counter:{post_id}` | hash `likes`, `views` | нет, вытеснение `allkeys-lru` (512 МБ) | кэш счётчиков |
 | `view:{post_id}:{user_id}` | string | 3600 с | дедуп просмотров |
 
 Фигурные скобки — hash tag: при переходе на Redis Cluster ключи одного поста окажутся в одном слоте.
@@ -261,7 +278,7 @@ flowchart LR
     rs -- healthy --> gw
 ```
 
-Наружу открыт только `:8080`. Compose собран из файлов в [docker-ymls](docker-ymls), все Python-образы — из одного [python.Dockerfile](docker-ymls/dockerfiles/python.Dockerfile) с аргументами `PACKAGE` и `SRC`.
+Наружу открыты только `:8080` (REST) и `:8081` (gRPC). Compose собран из файлов в [docker-ymls](docker-ymls), все Python-образы — из одного [python.Dockerfile](docker-ymls/dockerfiles/python.Dockerfile) с аргументами `PACKAGE` и `SRC`.
 
 ### Проверка руками
 
@@ -290,11 +307,16 @@ curl -s -H "$H" 'localhost:8080/api/v1/counters?post_ids=42,43' | jq
 | write | `VIEW_TOKEN_TTL_SECONDS` | 3600 |
 | write | `VIEW_MIN_SECONDS` | 2.0 |
 | write | `PUBLISH_TIMEOUT_SECONDS` | 2.0 |
+| write | `CHAOS_ACK_LOSS_RATE` — доля имитированных потерь ack Kafka, только для [load/chaos.py](load/chaos.py) | 0 |
+| write, read | `GRPC_PORT` | 50051 |
 | read | `DB_POOL_SIZE` | 20 |
 | read | `LOCAL_CACHE_TTL_SECONDS` / `LOCAL_CACHE_SIZE` | 1.0 / 100 000 |
 | read | `MAX_BATCH_POSTS` | 100 |
+| read | `LIKED_BY_TIMEOUT_SECONDS` — сколько ждать шард для `liked_by_me` | 0.5 |
 | aggregator | `KAFKA_GROUP_ID` / `KAFKA_TOPIC_PARTITIONS` | aggregator / 12 |
 | aggregator | `BATCH_WINDOW_SECONDS` / `BATCH_MAX_EVENTS` | 1.0 / 10 000 |
 | aggregator | `FLUSH_INTERVAL_SECONDS` | 10.0 |
 | aggregator | `RETRY_BACKOFF_SECONDS` | 1.0 |
+| aggregator | `SEEN_EVENTS_SIZE` — размер LRU для дедупа по `event_id` | 200 000 |
+| aggregator | `FLUSHED_VIEWS_SIZE` — LRU сброшенных в БД значений просмотров | 200 000 |
 | aggregator | `DB_POOL_SIZE` | 5 |

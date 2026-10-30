@@ -5,6 +5,7 @@ import time
 from functools import partial
 
 from aiokafka import AIOKafkaConsumer, ConsumerRebalanceListener
+from cachetools import LRUCache
 from redis.asyncio import Redis
 from shared.db import ShardedDatabase
 
@@ -29,6 +30,7 @@ class CheckpointOnRevoke(ConsumerRebalanceListener):
     async def on_partitions_revoked(self, revoked) -> None:
         if revoked:
             await checkpoint(self.flusher, self.consumer)
+            self.flusher.flushed_views.clear()
 
     async def on_partitions_assigned(self, assigned) -> None:
         pass
@@ -48,7 +50,7 @@ async def run() -> None:
     await ensure_topic(settings)
     db = ShardedDatabase(settings.database_urls, pool_size=settings.db_pool_size, pool_pre_ping=True)
     redis = Redis.from_url(settings.redis_url)
-    flusher = Flusher(db, redis)
+    flusher = Flusher(db, redis, settings.flushed_views_size)
     consumer = create_consumer(settings)
     consumer.subscribe([settings.kafka_topic], listener=CheckpointOnRevoke(flusher, consumer))
 
@@ -57,13 +59,16 @@ async def run() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
 
+    seen = LRUCache(settings.seen_events_size)
     await consumer.start()
     last_flush = time.monotonic()
     try:
         while not stop.is_set():
-            records = await poll_batch(consumer, settings.batch_window_seconds, settings.batch_max_events)
-            if records:
-                batch = Batch.from_records(records)
+            events = await poll_batch(consumer, settings.batch_window_seconds, settings.batch_max_events)
+            if events:
+                batch = Batch.from_events(events, seen)
+                if batch.duplicates:
+                    logger.info("skipped %d duplicate events", batch.duplicates)
                 await retry(partial(flusher.apply, batch), settings.retry_backoff_seconds)
             if time.monotonic() - last_flush >= settings.flush_interval_seconds:
                 await retry(partial(checkpoint, flusher, consumer), settings.retry_backoff_seconds)

@@ -1,0 +1,12 @@
+mode=none users=100 post=1718427149
+  view_finished: {'OK': 92, 'UNAVAILABLE': 8}
+  like:          {'OK': 92, 'UNAVAILABLE': 8}
+  counters: views=100 likes=100 (expected 100)
+mode=naive users=100 post=1891146000
+  view_finished: {'OK': 100}
+  like:          {'OK': 100}
+  counters: views=115 likes=100 (expected 100)
+mode=grpc users=100 post=1765629652
+  view_finished: {'OK': 100}
+  like:          {'OK': 100}
+  counters: views=100 likes=100 (expected 100)

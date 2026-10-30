@@ -1,0 +1,13 @@
+services:
+  k6:
+    image: grafana/k6:1.3.0
+    profiles: ["bench"]
+    environment:
+      JWT_SECRET: ${JWT_SECRET:-change-me-jwt}
+    volumes:
+      - ../load/k6:/scripts:ro
+      - ../shared/src/shared/proto:/proto:ro
+      - ../load/results:/results
+    depends_on:
+      write_service: { condition: service_healthy }
+      read_service: { condition: service_healthy }

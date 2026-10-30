@@ -11,6 +11,8 @@ class Settings(DatabaseSettings, RedisSettings, KafkaSettings):
     batch_max_events: int = 10_000
     flush_interval_seconds: float = 10.0
     retry_backoff_seconds: float = 1.0
+    seen_events_size: int = 200_000
+    flushed_views_size: int = 200_000
 
 
 @lru_cache
