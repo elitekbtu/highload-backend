@@ -35,28 +35,27 @@ class ShardedDatabase:
 
     async def read_shards[T](
         self, post_ids: Iterable[int], fn: Callable[[AsyncEngine, list[int]], Awaitable[T]], timeout: float
-    ) -> list[tuple[list[int], T | Exception]]:
-        async def attempt(engine: AsyncEngine, ids: list[int]) -> T:
-            async with asyncio.timeout(timeout):
-                return await fn(engine, ids)
-
-        async def read(shard: int, ids: list[int]) -> tuple[list[int], T | Exception]:
-            has_replica = shard < len(self.replicas)
-            if not has_replica or time.monotonic() >= self.primary_down_until[shard]:
+    ) -> list[T]:
+        async def read(shard: int, ids: list[int]) -> T | None:
+            for engine in self.read_engines(shard):
                 try:
-                    return ids, await attempt(self.engines[shard], ids)
-                except DB_ERRORS as exc:
-                    if not has_replica:
-                        return ids, exc
-                    self.primary_down_until[shard] = time.monotonic() + PRIMARY_RETRY_SECONDS
-                    logger.warning("shard %d primary unavailable, reading from replica", shard, exc_info=True)
-            try:
-                return ids, await attempt(self.replicas[shard], ids)
-            except DB_ERRORS as exc:
-                return ids, exc
+                    async with asyncio.timeout(timeout):
+                        return await fn(engine, ids)
+                except DB_ERRORS:
+                    logger.warning("shard %d read failed for %d posts", shard, len(ids), exc_info=True)
+                    if engine is self.engines[shard]:
+                        self.primary_down_until[shard] = time.monotonic() + PRIMARY_RETRY_SECONDS
+            return None
 
         groups = self.ring.group(post_ids)
-        return await asyncio.gather(*(read(shard, ids) for shard, ids in groups.items()))
+        results = await asyncio.gather(*(read(shard, ids) for shard, ids in groups.items()))
+        return [result for result in results if result is not None]
+
+    def read_engines(self, shard: int) -> list[AsyncEngine]:
+        replicas = self.replicas[shard : shard + 1]
+        if replicas and time.monotonic() < self.primary_down_until[shard]:
+            return replicas
+        return [self.engines[shard], *replicas]
 
     async def dispose(self) -> None:
         await asyncio.gather(*(engine.dispose() for engine in self.engines + self.replicas))

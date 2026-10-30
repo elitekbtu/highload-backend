@@ -1,8 +1,6 @@
 from datetime import datetime, timezone
-from typing import Annotated
 
 import jwt
-from fastapi import Depends, Request
 
 
 class InvalidViewToken(Exception):
@@ -31,10 +29,3 @@ class ViewTokens:
             raise InvalidViewToken("view token does not match post or user")
         if int(datetime.now(timezone.utc).timestamp() * 1000) - claims["t"] < self.min_ms:
             raise InvalidViewToken("view is too short")
-
-
-async def get_view_tokens(request: Request) -> ViewTokens:
-    return request.app.state.view_tokens
-
-
-ViewTokensDep = Annotated[ViewTokens, Depends(get_view_tokens)]

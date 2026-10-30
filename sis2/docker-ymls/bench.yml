@@ -5,9 +5,9 @@ services:
     environment:
       JWT_SECRET: ${JWT_SECRET:-change-me-jwt}
     volumes:
-      - ../load/k6:/scripts:ro
+      - ../load/bench/k6:/scripts:ro
       - ../shared/src/shared/proto:/proto:ro
-      - ../load/results:/results
+      - ../load/results/bench:/results
     depends_on:
       write_service: { condition: service_healthy }
       read_service: { condition: service_healthy }

@@ -1,7 +1,5 @@
 import logging
-from typing import Annotated
 
-from fastapi import Depends, Request
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from shared.redis_keys import VIEW_DEDUP_TTL_SECONDS, view_dedup_key
@@ -25,10 +23,3 @@ class ViewDedup:
             await self.redis.delete(view_dedup_key(post_id, user_id))
         except RedisError:
             logger.warning("view dedup unavailable", exc_info=True)
-
-
-async def get_dedup(request: Request) -> ViewDedup:
-    return request.app.state.dedup
-
-
-DedupDep = Annotated[ViewDedup, Depends(get_dedup)]

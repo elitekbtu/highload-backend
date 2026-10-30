@@ -23,7 +23,7 @@ class CounterCache:
             logger.warning("counter cache unavailable", exc_info=True)
             return {}
         return {
-            post_id: (int(likes), int(views))
+            post_id: Counters(int(likes), int(views))
             for post_id, (likes, views) in zip(post_ids, rows, strict=True)
             if likes is not None and views is not None
         }

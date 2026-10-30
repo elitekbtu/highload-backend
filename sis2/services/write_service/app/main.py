@@ -5,9 +5,11 @@ from fastapi.responses import JSONResponse
 from shared.redis_client import create_redis
 
 from app.config import get_settings
+from app.container import Container
 from app.routes import likes, views
 from app.rpc import create_server
 from app.services.dedup import ViewDedup
+from app.services.lossy_publisher import LossyPublisher
 from app.services.publisher import EventBusUnavailable, EventPublisher
 from app.services.view_token import ViewTokens
 
@@ -16,14 +18,16 @@ from app.services.view_token import ViewTokens
 async def lifespan(app: FastAPI):
     settings = get_settings()
     redis = create_redis(settings)
-    publisher = EventPublisher(settings)
+    publisher = LossyPublisher(settings) if settings.chaos_ack_loss_rate else EventPublisher(settings)
     await publisher.start()
-    app.state.publisher = publisher
-    app.state.dedup = ViewDedup(redis)
-    app.state.view_tokens = ViewTokens(
-        settings.view_token_secret, settings.view_token_ttl_seconds, settings.view_min_seconds
+    container = Container(
+        settings=settings,
+        publisher=publisher,
+        dedup=ViewDedup(redis),
+        view_tokens=ViewTokens(settings.view_token_secret, settings.view_token_ttl_seconds, settings.view_min_seconds),
     )
-    grpc_server = create_server(app.state, settings.grpc_port)
+    app.state.container = container
+    grpc_server = create_server(container)
     await grpc_server.start()
     try:
         yield

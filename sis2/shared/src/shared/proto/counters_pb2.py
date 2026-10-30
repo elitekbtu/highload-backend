@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1bshared/proto/counters.proto\x12\x0b\x63ounters.v1\"7\n\x0bLikeRequest\x12\x0f\n\x07post_id\x18\x01 \x01(\x03\x12\x17\n\x0fidempotency_key\x18\x02 \x01(\t\"%\n\x12ViewStartedRequest\x12\x0f\n\x07post_id\x18\x01 \x01(\x03\"&\n\x10ViewStartedReply\x12\x12\n\nview_token\x18\x01 \x01(\t\"S\n\x13ViewFinishedRequest\x12\x0f\n\x07post_id\x18\x01 \x01(\x03\x12\x12\n\nview_token\x18\x02 \x01(\t\x12\x17\n\x0fidempotency_key\x18\x03 \x01(\t\"%\n\nWriteReply\x12\x17\n\x0f\x61lready_counted\x18\x01 \x01(\x08\"%\n\x12GetCountersRequest\x12\x0f\n\x07post_id\x18\x01 \x01(\x03\"+\n\x17\x42\x61tchGetCountersRequest\x12\x10\n\x08post_ids\x18\x01 \x03(\x03\"g\n\x0cPostCounters\x12\x0f\n\x07post_id\x18\x01 \x01(\x03\x12\r\n\x05likes\x18\x02 \x01(\x03\x12\r\n\x05views\x18\x03 \x01(\x03\x12\x13\n\x0bliked_by_me\x18\x04 \x01(\x08\x12\x13\n\x0bunavailable\x18\x05 \x01(\x08\"D\n\x15\x42\x61tchGetCountersReply\x12+\n\x08\x63ounters\x18\x01 \x03(\x0b\x32\x19.counters.v1.PostCounters2\xa7\x02\n\x13\x43ounterWriteService\x12\x39\n\x04Like\x12\x18.counters.v1.LikeRequest\x1a\x17.counters.v1.WriteReply\x12;\n\x06Unlike\x12\x18.counters.v1.LikeRequest\x1a\x17.counters.v1.WriteReply\x12M\n\x0bViewStarted\x12\x1f.counters.v1.ViewStartedRequest\x1a\x1d.counters.v1.ViewStartedReply\x12I\n\x0cViewFinished\x12 .counters.v1.ViewFinishedRequest\x1a\x17.counters.v1.WriteReply2\xbd\x01\n\x12\x43ounterReadService\x12I\n\x0bGetCounters\x12\x1f.counters.v1.GetCountersRequest\x1a\x19.counters.v1.PostCounters\x12\\\n\x10\x42\x61tchGetCounters\x12$.counters.v1.BatchGetCountersRequest\x1a\".counters.v1.BatchGetCountersReplyb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1bshared/proto/counters.proto\x12\x0b\x63ounters.v1\"7\n\x0bLikeRequest\x12\x0f\n\x07post_id\x18\x01 \x01(\x03\x12\x17\n\x0fidempotency_key\x18\x02 \x01(\t\"%\n\x12ViewStartedRequest\x12\x0f\n\x07post_id\x18\x01 \x01(\x03\"&\n\x10ViewStartedReply\x12\x12\n\nview_token\x18\x01 \x01(\t\"S\n\x13ViewFinishedRequest\x12\x0f\n\x07post_id\x18\x01 \x01(\x03\x12\x12\n\nview_token\x18\x02 \x01(\t\x12\x17\n\x0fidempotency_key\x18\x03 \x01(\t\"%\n\nWriteReply\x12\x17\n\x0f\x61lready_counted\x18\x01 \x01(\x08\"%\n\x12GetCountersRequest\x12\x0f\n\x07post_id\x18\x01 \x01(\x03\"+\n\x17\x42\x61tchGetCountersRequest\x12\x10\n\x08post_ids\x18\x01 \x03(\x03\"|\n\x0cPostCounters\x12\x0f\n\x07post_id\x18\x01 \x01(\x03\x12\r\n\x05likes\x18\x02 \x01(\x03\x12\r\n\x05views\x18\x03 \x01(\x03\x12\x18\n\x0bliked_by_me\x18\x04 \x01(\x08H\x00\x88\x01\x01\x12\x13\n\x0bunavailable\x18\x05 \x01(\x08\x42\x0e\n\x0c_liked_by_me\"D\n\x15\x42\x61tchGetCountersReply\x12+\n\x08\x63ounters\x18\x01 \x03(\x0b\x32\x19.counters.v1.PostCounters2\xa7\x02\n\x13\x43ounterWriteService\x12\x39\n\x04Like\x12\x18.counters.v1.LikeRequest\x1a\x17.counters.v1.WriteReply\x12;\n\x06Unlike\x12\x18.counters.v1.LikeRequest\x1a\x17.counters.v1.WriteReply\x12M\n\x0bViewStarted\x12\x1f.counters.v1.ViewStartedRequest\x1a\x1d.counters.v1.ViewStartedReply\x12I\n\x0cViewFinished\x12 .counters.v1.ViewFinishedRequest\x1a\x17.counters.v1.WriteReply2\xbd\x01\n\x12\x43ounterReadService\x12I\n\x0bGetCounters\x12\x1f.counters.v1.GetCountersRequest\x1a\x19.counters.v1.PostCounters\x12\\\n\x10\x42\x61tchGetCounters\x12$.counters.v1.BatchGetCountersRequest\x1a\".counters.v1.BatchGetCountersReplyb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -46,11 +46,11 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_BATCHGETCOUNTERSREQUEST']._serialized_start=343
   _globals['_BATCHGETCOUNTERSREQUEST']._serialized_end=386
   _globals['_POSTCOUNTERS']._serialized_start=388
-  _globals['_POSTCOUNTERS']._serialized_end=491
-  _globals['_BATCHGETCOUNTERSREPLY']._serialized_start=493
-  _globals['_BATCHGETCOUNTERSREPLY']._serialized_end=561
-  _globals['_COUNTERWRITESERVICE']._serialized_start=564
-  _globals['_COUNTERWRITESERVICE']._serialized_end=859
-  _globals['_COUNTERREADSERVICE']._serialized_start=862
-  _globals['_COUNTERREADSERVICE']._serialized_end=1051
+  _globals['_POSTCOUNTERS']._serialized_end=512
+  _globals['_BATCHGETCOUNTERSREPLY']._serialized_start=514
+  _globals['_BATCHGETCOUNTERSREPLY']._serialized_end=582
+  _globals['_COUNTERWRITESERVICE']._serialized_start=585
+  _globals['_COUNTERWRITESERVICE']._serialized_end=880
+  _globals['_COUNTERREADSERVICE']._serialized_start=883
+  _globals['_COUNTERREADSERVICE']._serialized_end=1072
 # @@protoc_insertion_point(module_scope)

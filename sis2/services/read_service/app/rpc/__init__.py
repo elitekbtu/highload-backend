@@ -1,17 +1,17 @@
 import grpc
 from shared.proto.counters_pb2_grpc import CounterReadServiceServicer, add_CounterReadServiceServicer_to_server
-from starlette.datastructures import State
 
+from app.container import Container
 from app.rpc.counters import CountersRpc
 
 
 class CounterReadService(CountersRpc, CounterReadServiceServicer):
-    def __init__(self, state: State):
-        self.state = state
+    def __init__(self, container: Container):
+        self.container = container
 
 
-def create_server(state: State, port: int) -> grpc.aio.Server:
+def create_server(container: Container) -> grpc.aio.Server:
     server = grpc.aio.server()
-    add_CounterReadServiceServicer_to_server(CounterReadService(state), server)
-    server.add_insecure_port(f"[::]:{port}")
+    add_CounterReadServiceServicer_to_server(CounterReadService(container), server)
+    server.add_insecure_port(f"[::]:{container.settings.grpc_port}")
     return server

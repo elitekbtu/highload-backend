@@ -1,6 +1,11 @@
+from typing import NamedTuple
+
 from cachetools import TTLCache
 
-Counters = tuple[int, int]
+
+class Counters(NamedTuple):
+    likes: int
+    views: int
 
 
 class LocalCache:

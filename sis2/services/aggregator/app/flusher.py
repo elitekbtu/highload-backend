@@ -25,6 +25,9 @@ class Flusher:
         self.pending_views: Counter[int] = Counter()
         self.flushed_views: LRUCache[int, int] = LRUCache(flushed_views_size)
 
+    def forget(self) -> None:
+        self.flushed_views.clear()
+
     async def apply(self, batch: Batch) -> None:
         likes = await self.apply_likes(batch.like_changes) if batch.like_changes else {}
         views = await self.total_views(batch.views) if batch.views else {}
@@ -32,37 +35,12 @@ class Flusher:
         self.pending_views.update(batch.views)
 
     async def apply_likes(self, changes: dict[tuple[int, int], EventType]) -> dict[int, int]:
-
         async def apply_shard(engine: AsyncEngine, post_ids: list[int]) -> dict[int, int]:
             shard_posts = set(post_ids)
-            shard_changes = sorted((key, kind) for key, kind in changes.items() if key[0] in shard_posts)
-            liked = [{"post_id": p, "user_id": u} for (p, u), kind in shard_changes if kind is EventType.LIKE]
-            unliked = [(p, u) for (p, u), kind in shard_changes if kind is EventType.UNLIKE]
-            delta = Counter({post_id: 0 for post_id in shard_posts})
+            return await write_likes(engine, sorted(item for item in changes.items() if item[0][0] in shard_posts))
 
-            async with engine.begin() as conn:
-                if liked:
-                    rows = await conn.scalars(
-                        insert(Like).values(liked).on_conflict_do_nothing().returning(Like.post_id)
-                    )
-                    delta.update(rows.all())
-                if unliked:
-                    rows = await conn.scalars(
-                        delete(Like).where(tuple_(Like.post_id, Like.user_id).in_(unliked)).returning(Like.post_id)
-                    )
-                    delta.subtract(rows.all())
-                stmt = insert(PostCounter).values(
-                    [{"post_id": post_id, "likes_count": delta[post_id]} for post_id in sorted(delta)]
-                )
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=[PostCounter.post_id],
-                    set_={"likes_count": PostCounter.likes_count + stmt.excluded.likes_count, "updated_at": func.now()},
-                ).returning(PostCounter.post_id, PostCounter.likes_count)
-                return {row.post_id: row.likes_count for row in await conn.execute(stmt)}
-
-        post_ids = {post_id for post_id, _ in changes}
         likes: dict[int, int] = {}
-        for shard_likes in await self.db.map_shards(post_ids, apply_shard):
+        for shard_likes in await self.db.map_shards({post_id for post_id, _ in changes}, apply_shard):
             likes |= shard_likes
         return likes
 
@@ -87,32 +65,11 @@ class Flusher:
         pending, self.pending_views = self.pending_views, Counter()
 
         async def flush_shard(engine: AsyncEngine, post_ids: list[int]) -> dict[int, int] | Exception:
-            post_ids.sort()
             try:
-                return await write_shard(engine, post_ids)
+                return await write_views(engine, {post_id: pending[post_id] for post_id in sorted(post_ids)})
             except Exception as exc:
                 self.pending_views.update({post_id: pending[post_id] for post_id in post_ids})
                 return exc
-
-        async def write_shard(engine: AsyncEngine, post_ids: list[int]) -> dict[int, int]:
-            written: dict[int, int] = {}
-            async with engine.begin() as conn:
-                for start in range(0, len(post_ids), CHUNK_SIZE):
-                    chunk = post_ids[start : start + CHUNK_SIZE]
-                    stmt = insert(PostCounter).values(
-                        [{"post_id": post_id, "views_count": pending[post_id]} for post_id in chunk]
-                    )
-                    rows = await conn.execute(
-                        stmt.on_conflict_do_update(
-                            index_elements=[PostCounter.post_id],
-                            set_={
-                                "views_count": PostCounter.views_count + stmt.excluded.views_count,
-                                "updated_at": func.now(),
-                            },
-                        ).returning(PostCounter.post_id, PostCounter.views_count)
-                    )
-                    written.update({row.post_id: row.views_count for row in rows})
-            return written
 
         flushed: dict[int, int] = {}
         errors: list[Exception] = []
@@ -126,6 +83,49 @@ class Flusher:
         if errors:
             raise errors[0]
         logger.info("flushed views of %d posts", len(pending))
+
+
+async def write_likes(engine: AsyncEngine, changes: list[tuple[tuple[int, int], EventType]]) -> dict[int, int]:
+    liked = [{"post_id": p, "user_id": u} for (p, u), kind in changes if kind is EventType.LIKE]
+    unliked = [(p, u) for (p, u), kind in changes if kind is EventType.UNLIKE]
+    delta = Counter({post_id: 0 for (post_id, _), _ in changes})
+
+    async with engine.begin() as conn:
+        if liked:
+            rows = await conn.scalars(insert(Like).values(liked).on_conflict_do_nothing().returning(Like.post_id))
+            delta.update(rows.all())
+        if unliked:
+            rows = await conn.scalars(
+                delete(Like).where(tuple_(Like.post_id, Like.user_id).in_(unliked)).returning(Like.post_id)
+            )
+            delta.subtract(rows.all())
+        stmt = insert(PostCounter).values(
+            [{"post_id": post_id, "likes_count": delta[post_id]} for post_id in sorted(delta)]
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[PostCounter.post_id],
+            set_={"likes_count": PostCounter.likes_count + stmt.excluded.likes_count, "updated_at": func.now()},
+        ).returning(PostCounter.post_id, PostCounter.likes_count)
+        return {row.post_id: row.likes_count for row in await conn.execute(stmt)}
+
+
+async def write_views(engine: AsyncEngine, views: dict[int, int]) -> dict[int, int]:
+    post_ids = list(views)
+    written: dict[int, int] = {}
+    async with engine.begin() as conn:
+        for start in range(0, len(post_ids), CHUNK_SIZE):
+            stmt = insert(PostCounter).values(
+                [
+                    {"post_id": post_id, "views_count": views[post_id]}
+                    for post_id in post_ids[start : start + CHUNK_SIZE]
+                ]
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[PostCounter.post_id],
+                set_={"views_count": PostCounter.views_count + stmt.excluded.views_count, "updated_at": func.now()},
+            ).returning(PostCounter.post_id, PostCounter.views_count)
+            written |= {row.post_id: row.views_count for row in await conn.execute(stmt)}
+    return written
 
 
 async def load_views(engine: AsyncEngine, post_ids: list[int]) -> dict[int, int]:

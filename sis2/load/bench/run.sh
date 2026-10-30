@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 DURATION=${DURATION:-30s}
 for run in single:500 batch:200 like:300; do
@@ -14,4 +14,4 @@ for run in single:500 batch:200 like:300; do
   done
 done
 
-uv run python load/summarize.py
+uv run python load/bench/summarize.py | tee load/results/bench/summary.md

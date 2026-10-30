@@ -1,103 +1,65 @@
-import argparse
 import asyncio
 import random
+import sys
 import uuid
 from collections import Counter
 
-import grpc
-from client import READ_TIMEOUT, WRITE_TIMEOUT, auth, channel, stubs
+from client import READ_TIMEOUT, WRITE_TIMEOUT, auth, connect, paced, status
 from shared.proto import counters_pb2 as pb
 
+USERS = 100
 RATE = 20
+MODES = ("none", "naive", "grpc")
 
 
-async def paced(calls):
-    tasks = []
-    for call in calls:
-        tasks.append(asyncio.ensure_future(call()))
-        await asyncio.sleep(1 / RATE)
-    return await asyncio.gather(*tasks)
-
-
-async def outcome(call) -> str:
-    try:
-        await call()
-        return "OK"
-    except grpc.aio.AioRpcError as exc:
-        return exc.code().name
-
-
-async def naive(make_call, attempts: int = 4) -> str:
+async def send(mode: str, method, request, user_id: int) -> str:
+    attempts = 4 if mode == "naive" else 1
     result = "UNAVAILABLE"
     for _ in range(attempts):
-        result = await outcome(lambda: make_call(str(uuid.uuid4())))
+        request.idempotency_key = str(uuid.uuid4())
+        result = await status(method(request, metadata=auth(user_id), timeout=WRITE_TIMEOUT))
         if result != "UNAVAILABLE":
-            return result
+            break
         await asyncio.sleep(0.05)
     return result
 
 
-async def run(mode: str, users: int, target: str) -> None:
+async def run(mode: str) -> None:
     post_id = random.randint(10**9, 2 * 10**9)
-    base = random.randint(10**6, 10**9)
-    async with channel(target, retries=mode == "grpc") as chan:
-        write, read = stubs(chan)
+    first_user = random.randint(10**6, 10**9)
+    users = range(first_user, first_user + USERS)
 
-        async def get() -> pb.PostCounters:
-            return await read.GetCounters(
-                pb.GetCountersRequest(post_id=post_id), metadata=auth(1), timeout=READ_TIMEOUT
-            )
-
-        await get()
-
-        def like_call(user_id: int):
-            def call(key: str):
-                request = pb.LikeRequest(post_id=post_id, idempotency_key=key)
-                return write.Like(request, metadata=auth(user_id), timeout=WRITE_TIMEOUT)
-
-            return call
-
-        tokens = await paced(
-            lambda user_id=user_id: write.ViewStarted(
-                pb.ViewStartedRequest(post_id=post_id), metadata=auth(user_id), timeout=WRITE_TIMEOUT
-            )
-            for user_id in range(base, base + users)
+    channel, write, read = connect(retries=mode == "grpc")
+    async with channel:
+        started = await paced(
+            (
+                write.ViewStarted(pb.ViewStartedRequest(post_id=post_id), metadata=auth(u), timeout=WRITE_TIMEOUT)
+                for u in users
+            ),
+            RATE,
         )
         await asyncio.sleep(2.1)
-
-        def view_call(user_id: int, token: str):
-            def call(key: str):
-                request = pb.ViewFinishedRequest(post_id=post_id, view_token=token, idempotency_key=key)
-                return write.ViewFinished(request, metadata=auth(user_id), timeout=WRITE_TIMEOUT)
-
-            return call
-
-        def attempt(make_call):
-            if mode == "naive":
-                return lambda: naive(make_call)
-            key = str(uuid.uuid4())
-            return lambda: outcome(lambda: make_call(key))
-
-        views = await paced(attempt(view_call(base + i, t.view_token)) for i, t in enumerate(tokens))
-        likes = await paced(attempt(like_call(user_id)) for user_id in range(base, base + users))
+        views = await paced(
+            (
+                send(mode, write.ViewFinished, pb.ViewFinishedRequest(post_id=post_id, view_token=s.view_token), u)
+                for u, s in zip(users, started)
+            ),
+            RATE,
+        )
+        likes = await paced((send(mode, write.Like, pb.LikeRequest(post_id=post_id), u) for u in users), RATE)
 
         await asyncio.sleep(2.5)
-        counters = await get()
+        counters = await read.GetCounters(
+            pb.GetCountersRequest(post_id=post_id), metadata=auth(first_user), timeout=READ_TIMEOUT
+        )
 
-    print(f"mode={mode} users={users} post={post_id}")
+    print(f"mode={mode}")
     print(f"  view_finished: {dict(Counter(views))}")
     print(f"  like:          {dict(Counter(likes))}")
-    print(f"  counters: views={counters.views} likes={counters.likes} (expected {users})")
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["none", "naive", "grpc"])
-    parser.add_argument("--users", type=int, default=100)
-    parser.add_argument("--target", default="localhost:8081")
-    args = parser.parse_args()
-    asyncio.run(run(args.mode, args.users, args.target))
+    print(f"  counters: views={counters.views} likes={counters.likes} (expected {USERS})")
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) != 2 or sys.argv[1] not in MODES:
+        sys.exit(f"usage: chaos.py {'|'.join(MODES)}")
+    asyncio.run(run(sys.argv[1]))

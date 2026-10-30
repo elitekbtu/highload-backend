@@ -1,132 +1,133 @@
-# SIS 2 — счётчик лайков и просмотров на gRPC
+# SIS 2 — Like and View Counter on gRPC
 
-**Коротко.** В сервис из SIS 1 добавлен gRPC-интерфейс, REST оставлен рядом для сравнения. На проводе gRPC в 2–8 раз компактнее. По медиане latency протоколы равны, по хвостам выигрывает gRPC. Ретраи с одним ключом идемпотентности держат счётчики точными, даже когда 10% подтверждений от Kafka теряются.
+**In short.** We added a gRPC interface to the service from SIS 1. REST is still there, so we can compare them. On the network, gRPC is 2–8 times smaller. The median latency is the same. The slowest requests are faster with gRPC. Retries with one idempotency key keep the counters exact, even when 10% of Kafka acks are lost.
 
-> Реализация на Python, а не на Java. Сервис из SIS 1 уже написан на Python, и REST с gRPC живут в одном процессе поверх одной бизнес-логики. Поэтому сравнивается именно протокол, а не два разных рантайма.
+> The code is in Python, not Java. The service from SIS 1 is in Python. REST and gRPC run in one process on the same business logic. So we compare only the protocol, not two different runtimes.
 
 ---
 
-## Почему gRPC
+## Why gRPC
 
-Лента — основной потребитель счётчиков: она запрашивает их пачками по 100 постов при ~44k RPS. Поэтому важно, сколько байт уходит в сеть и как ведёт себя один долгоживущий канал.
+The feed is the main user of the counters. It asks for 100 posts at a time, at about 44k RPS. So the number of bytes on the network matters, and one long connection must work well.
 
-- **protobuf** в 4–6 раз меньше JSON на тех же данных.
-- **HTTP/2** держит одно соединение на много параллельных запросов. HPACK сжимает заголовок с JWT, который иначе уходил бы текстом в каждом запросе.
-- **Дедлайны, ретраи и статусы** встроены в протокол, их не нужно изобретать.
-- **WebSocket** не нужен: счётчики забираются по запросу, задержка до 2 с допустима, push никто не просит.
+- **protobuf** is 4–6 times smaller than JSON for the same data.
+- **HTTP/2** keeps one connection for many requests at the same time. HPACK makes the JWT header small. Without it, the JWT goes as text in every request.
+- **Deadlines, retries and status codes** are part of the protocol. We do not need to make them ourselves.
+- **WebSocket** is not needed. Clients ask for counters when they need them. A delay up to 2 s is OK. Nobody needs push.
 
-## Что сделано
+## What we did
 
-| | Как |
+| | How |
 |---|---|
-| **Контракт** | [counters.proto](shared/src/shared/proto/counters.proto): `CounterWriteService` (`Like`, `Unlike`, `ViewStarted`, `ViewFinished`) и `CounterReadService` (`GetCounters`, `BatchGetCounters`). Gateway отдаёт gRPC на `:8081` |
-| **Идемпотентность** | Клиент шлёт `idempotency_key`, он становится `event_id` события в Kafka. Aggregator помнит последние 200k id и пропускает повторы. В REST то же делает заголовок `Idempotency-Key` |
-| **Таймауты** | Дедлайн клиента: запись 1 с, чтение 300 мс. Сервер не ждёт Redis, Kafka и БД дольше, чем клиент готов ждать ответ, и возвращает `DEADLINE_EXCEEDED` |
-| **Ретраи** | `retryPolicy`: до 4 попыток, пауза 50 мс × 2ⁿ со случайным разбросом, повторяется только `UNAVAILABLE`. `retryThrottling` выключает ретраи при массовом сбое |
+| **Contract** | [counters.proto](shared/src/shared/proto/counters.proto): `CounterWriteService` (`Like`, `Unlike`, `ViewStarted`, `ViewFinished`) and `CounterReadService` (`GetCounters`, `BatchGetCounters`). The gateway serves gRPC on `:8081` |
+| **Idempotency** | The client sends `idempotency_key`. It becomes the `event_id` of the Kafka event. The aggregator remembers the last 200k ids and drops repeats. In REST, the header `Idempotency-Key` does the same |
+| **Timeouts** | Client deadline: 1 s for writes, 300 ms for reads. The server does not wait for Redis, Kafka or the DB longer than the client waits. Then it answers `DEADLINE_EXCEEDED` |
+| **Retries** | `retryPolicy`: up to 4 tries, pause 50 ms × 2ⁿ with a random part, only for `UNAVAILABLE`. `retryThrottling` turns retries off when many calls fail |
 
-Как это выглядит при потерянном подтверждении от Kafka:
+This is what happens when a Kafka ack is lost:
 
 ```mermaid
 sequenceDiagram
-    participant C as Клиент
+    participant C as Client
     participant W as write_service
     participant K as Kafka
     participant A as aggregator
     C->>W: Like(key=K1)
     W->>K: event_id=K1
-    K--xW: ack потерян
+    K--xW: ack is lost
     W-->>C: UNAVAILABLE
-    C->>W: Like(key=K1) — ретрай, тот же ключ
+    C->>W: Like(key=K1), retry, same key
     W->>K: event_id=K1
     W-->>C: OK
     K->>A: K1, K1
-    A->>A: второй K1 пропущен
+    A->>A: second K1 is dropped
 ```
 
-Одна находка по ходу работы: в grpcio 1.85.1 поле `timeout` в service config ломается, и любой вызов сразу получает `DEADLINE_EXCEEDED`. Поэтому дедлайн передаётся в каждом вызове.
+One thing we found: in grpcio 1.85.1, the `timeout` field in the service config is broken. Every call gets `DEADLINE_EXCEEDED` at once. So we pass the deadline in every call.
 
 ---
 
-## Замеры
+## Measurements
 
-**Стенд:** Apple M4, Docker с 10 CPU и 8 ГБ. Python 3.12, grpcio 1.85, FastAPI + uvicorn (1 воркер), Kafka ×3, Redis с репликой и Sentinel, 2 шарда Postgres с репликами. k6 работает внутри docker-сети с постоянным RPS по 30 с на прогон, кэши прогреты.
+**Test setup:** Apple M4, Docker with 10 CPU and 8 GB. Python 3.12, grpcio 1.85, FastAPI + uvicorn (1 worker), Kafka ×3, Redis with a replica and Sentinel, 2 Postgres shards with replicas. k6 runs inside the Docker network with a fixed RPS for 30 s per run. Caches are warm.
 
-### Размер сообщения
+### Message size
 
-| Сообщение | protobuf | JSON | разница |
+| Message | protobuf | JSON | difference |
 |---|---|---|---|
-| Счётчики одного поста | 12 B | 67 B | **5.6×** |
-| 100 id в запросе | 400 B | 888 B | 2.2× |
-| Ответ на 100 постов | 1.4 KB | 6.7 KB | **4.6×** |
-| ViewFinished (почти весь — JWT) | 168 B | 177 B | 1.1× |
+| Counters of one post | 12 B | 67 B | **5.6×** |
+| 100 ids in a request | 400 B | 888 B | 2.2× |
+| Answer for 100 posts | 1.4 KB | 6.7 KB | **4.6×** |
+| ViewFinished (mostly the JWT) | 168 B | 177 B | 1.1× |
 
-### Latency и трафик
+### Latency and traffic
 
-Трафик считается вместе с заголовками и фреймингом, то есть всё, что прошло по TCP.
+Traffic includes headers and framing: everything that goes over TCP.
 
-| Сценарий | | p50 | p99 | max | отправлено | получено |
+| Case | | p50 | p99 | max | sent | received |
 |---|---|---|---|---|---|---|
-| 1 пост, 500 RPS | REST | 0.81 мс | 10.1 мс | 74 мс | 220 B | 181 B |
-| | **gRPC** | 0.77 мс | **1.9 мс** | **30 мс** | **69 B** | **86 B** |
-| 100 постов, 200 RPS | REST | 1.92 мс | 25.2 мс | 104 мс | 707 B | 5830 B |
-| | **gRPC** | 1.92 мс | 23.7 мс | **51 мс** | **272 B** | **759 B** |
-| like, 300 RPS | REST | 6.08 мс | 9.8 мс | 66 мс | 236 B | 98 B |
-| | **gRPC** | 6.17 мс | 9.5 мс | **47 мс** | **71 B** | **84 B** |
+| 1 post, 500 RPS | REST | 0.81 ms | 10.1 ms | 74 ms | 220 B | 181 B |
+| | **gRPC** | 0.77 ms | **1.9 ms** | **30 ms** | **69 B** | **86 B** |
+| 100 posts, 200 RPS | REST | 1.92 ms | 25.2 ms | 104 ms | 707 B | 5830 B |
+| | **gRPC** | 1.92 ms | 23.7 ms | **51 ms** | **272 B** | **759 B** |
+| like, 300 RPS | REST | 6.08 ms | 9.8 ms | 66 ms | 236 B | 98 B |
+| | **gRPC** | 6.17 ms | 9.5 ms | **47 ms** | **71 B** | **84 B** |
 
-Ошибок не было ни в одном прогоне. Таблица снята на стенде с одним брокером Kafka и одним Redis. На стенде с репликами (14 контейнеров) медиана та же, ~0.85 мс, а p99 одиночного чтения у обоих протоколов гуляет от 10 до 110 мс между повторами одного и того же прогона.
+No run had errors. We made this table on a setup with one Kafka broker and one Redis. On the setup with replicas (14 containers), the median is the same, about 0.85 ms. But p99 for one post changes from 10 to 110 ms between runs, for both protocols.
 
-### Ретраи под сбоем
+### Retries when things fail
 
-write_service запущен в режиме, где 10% или 30% подтверждений от Kafka «теряются»: событие записано, а клиент получает ошибку. 100 пользователей лайкают и смотрят один пост.
+In this test, write_service "loses" 10% or 30% of Kafka acks: the event is saved, but the client gets an error. 100 users like and view one post.
 
-| Сбоев | Как ретраим | Успешных вызовов | Просмотров (нужно 100) |
+| Failures | How we retry | Calls OK | Views (must be 100) |
 |---|---|---|---|
-| 10% | не ретраим | 92% | 100 |
-| 10% | сами, с новым ключом на каждую попытку | 100% | **115** ❌ |
-| 10% | `retryPolicy`, один ключ | **100%** | **100** ✅ |
-| 30% | не ретраим | 67% | 100 |
-| 30% | сами, с новым ключом | 100% | **137** ❌ |
-| 30% | `retryPolicy`, один ключ | 99% / 82% лайков | **100** ✅ |
+| 10% | no retry | 92% | 100 |
+| 10% | by hand, new key every try | 100% | **115** ❌ |
+| 10% | `retryPolicy`, one key | **100%** | **100** ✅ |
+| 30% | no retry | 67% | 100 |
+| 30% | by hand, new key | 100% | **137** ❌ |
+| 30% | `retryPolicy`, one key | 99% / 82% of likes | **100** ✅ |
 
-### Падение узла Kafka или Redis
+### A Kafka or Redis node dies
 
-Kafka работает на 3 узлах с фактором репликации 3, Redis — мастер, реплика и 3 Sentinel. [load/failover.py](load/failover.py) шлёт 30 лайков в секунду на 12 постов и на 3-й секунде убивает узел через `docker kill`.
+Kafka has 3 nodes with replication factor 3. Redis has a master, a replica and 3 Sentinels. [load/failover.py](load/failover.py) sends 30 likes per second to 12 posts. At second 3, it kills a node with `docker kill`.
 
-| Убит | Подтверждено клиенту | Посчитано | Ошибки клиента | Потеряно / задвоено |
+| Killed | OK for the client | Counted | Client errors | Lost / double |
 |---|---|---|---|---|
-| брокер Kafka | 242 из 300 | **300** | `DEADLINE_EXCEEDED` в течение ~2 с, пока выбирались новые лидеры партиций | **нет** |
-| мастер Redis | 300 из 300 | **300** | 4 чтения из 100 не уложились в 300 мс, пока Sentinel повышал реплику | **нет** |
+| Kafka broker | 242 of 300 | **300** | `DEADLINE_EXCEEDED` for about 2 s, while Kafka picks new partition leaders | **none** |
+| Redis master | 300 of 300 | **300** | 4 of 100 reads were slower than 300 ms, while Sentinel made the replica the master | **none** |
 
-Отдельно проверено чтение постов, которых нет в Redis, при падении шарда Postgres:
+We also tested reads of posts that are not in Redis when a Postgres shard dies:
 
-| Что упало | Первый запрос | Следующие | Результат |
+| What is down | First request | Next requests | Result |
 |---|---|---|---|
-| primary шарда | 876 мс (ждём таймаут primary) | 7 мс (сразу в реплику) | данные верные, `liked_by_me` на месте |
-| primary и реплика | 514 мс | 28 мс | посты этого шарда с `unavailable = true`, остальные в порядке, запрос не падает |
+| shard primary | 876 ms (waits for the primary timeout) | 7 ms (goes to the replica at once) | data is right, `liked_by_me` is there |
+| primary and replica | 514 ms | 28 ms | posts of this shard have `unavailable = true`, other posts are fine, the request does not fail |
 
-Лайки, на которые клиент получил ошибку, всё равно дошли: producer дождался нового лидера и дослал их. Повтор с тем же `idempotency_key` тоже был бы безопасен.
+The likes with a client error still arrived. The producer waited for the new leader and sent them. A retry with the same `idempotency_key` would be safe too.
 
 ---
 
-## Выводы
+## Conclusions
 
-- **Трафик — главный выигрыш.** Ответ ленты в 7–8 раз меньше. При 44k RPS чтений это ~33 МБ/с вместо ~250 МБ/с. Запросы в 3 раза меньше в основном благодаря HPACK: JWT уходит в сеть один раз на соединение, а не с каждым запросом.
-- **Медиана не меняется.** Время уходит на Redis, Postgres и подтверждение Kafka (~6 мс на лайк), а не на протокол. Хвосты на чистом стенде у gRPC короче: на одиночном чтении p99 в 5 раз ниже. Но p99 сильно зависит от фоновой нагрузки, и на стенде с репликами разница в отдельных прогонах бывает в обе стороны, так что этот выигрыш — предварительный. На пачках p99 сравнялся, там всё решает запрос к БД за `liked_by_me`.
-- **Ретраи без идемпотентности вредны.** Ошибки они скрывают, но просмотры завышаются на 15–37%, а в SIS 1 допустимая погрешность меньше 1%.
-- **С одним ключом ретраи безопасны.** При 10% сбоев пользователь ошибок не видит, счётчики точные.
-- **При 30% сбоев ретраи отключает `retryThrottling`, и это правильно.** Когда сервис серьёзно болен, повторы только добивают его. Часть лайков вернула ошибку, но ни один не посчитан дважды.
+- **Traffic is the main win.** The feed answer is 7–8 times smaller. At 44k RPS of reads, this is about 33 MB/s instead of about 250 MB/s. Requests are 3 times smaller, mostly because of HPACK: the JWT goes over the network once per connection, not with every request.
+- **The median does not change.** The time goes to Redis, Postgres and the Kafka ack (about 6 ms per like), not to the protocol. On the clean setup, the slowest requests are faster with gRPC: p99 for one post is 5 times lower. But p99 depends a lot on other work on the machine. On the setup with replicas, some runs are better for REST, some for gRPC. So this win is not final. For 100 posts, p99 is the same: the DB query for `liked_by_me` decides it.
+- **Retries without idempotency are bad.** They hide errors, but views go up by 15–37%. In SIS 1, the allowed error is less than 1%.
+- **With one key, retries are safe.** With 10% failures, the user sees no errors, and the counters are exact.
+- **With 30% failures, `retryThrottling` turns retries off, and this is right.** When the service is very sick, retries only make it worse. Some likes got an error, but no like was counted twice.
 
-## Как повторить
+## How to repeat
 
 ```bash
 docker compose up --build -d
-uv run python load/payload.py                     # размеры сообщений
-./load/bench.sh                                   # latency и трафик → load/results/
+set -a; source .env; set +a                       # scripts need JWT_SECRET
+uv run python load/payload.py                     # message sizes
+./load/bench/run.sh                               # latency and traffic → load/results/bench/
 
 CHAOS_ACK_LOSS_RATE=0.1 docker compose up -d --wait write_service
-uv run python load/chaos.py none|naive|grpc       # ретраи под сбоем
-docker compose up -d --wait write_service         # вернуть как было
+uv run python load/chaos.py none|naive|grpc       # retries when acks are lost
+docker compose up -d --wait write_service         # back to normal
 
-uv run python load/failover.py kafka-2            # падение брокера Kafka
-uv run python load/failover.py redis-0            # падение мастера Redis (тот, что сейчас мастер)
+uv run python load/failover.py kafka-2            # a Kafka broker dies
+uv run python load/failover.py redis-0            # the Redis master dies (use the current master)
 ```

@@ -6,7 +6,7 @@ from collections.abc import Iterable, Sequence
 VIRTUAL_NODES = 160
 
 
-def _hash(key: str) -> int:
+def stable_hash(key: str) -> int:
     return int.from_bytes(hashlib.blake2b(key.encode(), digest_size=8).digest())
 
 
@@ -17,13 +17,15 @@ class HashRing:
         if len(set(nodes)) != len(nodes):
             raise ValueError("node names must be unique")
         points = sorted(
-            (_hash(f"{node}#{replica}"), index) for index, node in enumerate(nodes) for replica in range(virtual_nodes)
+            (stable_hash(f"{node}#{replica}"), index)
+            for index, node in enumerate(nodes)
+            for replica in range(virtual_nodes)
         )
         self._points = [point for point, _ in points]
         self._nodes = [index for _, index in points]
 
     def node_for(self, post_id: int) -> int:
-        position = bisect.bisect(self._points, _hash(str(post_id)))
+        position = bisect.bisect(self._points, stable_hash(str(post_id)))
         return self._nodes[position % len(self._nodes)]
 
     def group(self, post_ids: Iterable[int]) -> dict[int, list[int]]:

@@ -5,6 +5,7 @@ from shared.db import ShardedDatabase
 from shared.redis_client import create_redis
 
 from app.config import get_settings
+from app.container import Container
 from app.routes import counters
 from app.rpc import create_server
 from app.services.cache import CounterCache
@@ -23,13 +24,15 @@ async def lifespan(app: FastAPI):
         max_overflow=0,
         pool_pre_ping=True,
     )
-    app.state.counters = CountersService(
+    counters = CountersService(
         db,
         CounterCache(redis),
         LocalCache(settings.local_cache_size, settings.local_cache_ttl_seconds),
         settings.db_timeout_seconds,
     )
-    grpc_server = create_server(app.state, settings.grpc_port)
+    container = Container(settings=settings, counters=counters)
+    app.state.container = container
+    grpc_server = create_server(container)
     await grpc_server.start()
     try:
         yield

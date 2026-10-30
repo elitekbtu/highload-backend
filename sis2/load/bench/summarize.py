@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-RESULTS = Path(__file__).parent / "results"
+RESULTS = Path(__file__).parent.parent / "results" / "bench"
 DURATION_METRIC = {"rest": "http_req_duration", "grpc": "grpc_req_duration"}
 
 

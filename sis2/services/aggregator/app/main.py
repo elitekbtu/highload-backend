@@ -30,7 +30,7 @@ class CheckpointOnRevoke(ConsumerRebalanceListener):
     async def on_partitions_revoked(self, revoked) -> None:
         if revoked:
             await checkpoint(self.flusher, self.consumer)
-            self.flusher.flushed_views.clear()
+            self.flusher.forget()
 
     async def on_partitions_assigned(self, assigned) -> None:
         pass
