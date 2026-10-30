@@ -1,0 +1,16 @@
+from datetime import datetime
+
+from sqlalchemy import BigInteger, DateTime, func
+from sqlalchemy.orm import Mapped, mapped_column
+
+from shared.models.base import Base
+
+
+class Like(Base):
+    __tablename__ = "likes"
+
+    post_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
