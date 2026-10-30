@@ -16,12 +16,18 @@ from app.services.local_cache import LocalCache
 async def lifespan(app: FastAPI):
     settings = get_settings()
     redis = create_redis(settings)
-    db = ShardedDatabase(settings.database_urls, pool_size=settings.db_pool_size, max_overflow=0, pool_pre_ping=True)
+    db = ShardedDatabase(
+        settings.database_urls,
+        settings.database_replica_urls,
+        pool_size=settings.db_pool_size,
+        max_overflow=0,
+        pool_pre_ping=True,
+    )
     app.state.counters = CountersService(
         db,
         CounterCache(redis),
         LocalCache(settings.local_cache_size, settings.local_cache_ttl_seconds),
-        settings.liked_by_timeout_seconds,
+        settings.db_timeout_seconds,
     )
     grpc_server = create_server(app.state, settings.grpc_port)
     await grpc_server.start()

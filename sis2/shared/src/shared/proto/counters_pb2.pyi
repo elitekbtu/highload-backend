@@ -55,16 +55,18 @@ class BatchGetCountersRequest(_message.Message):
     def __init__(self, post_ids: _Optional[_Iterable[int]] = ...) -> None: ...
 
 class PostCounters(_message.Message):
-    __slots__ = ("post_id", "likes", "views", "liked_by_me")
+    __slots__ = ("post_id", "likes", "views", "liked_by_me", "unavailable")
     POST_ID_FIELD_NUMBER: _ClassVar[int]
     LIKES_FIELD_NUMBER: _ClassVar[int]
     VIEWS_FIELD_NUMBER: _ClassVar[int]
     LIKED_BY_ME_FIELD_NUMBER: _ClassVar[int]
+    UNAVAILABLE_FIELD_NUMBER: _ClassVar[int]
     post_id: int
     likes: int
     views: int
     liked_by_me: bool
-    def __init__(self, post_id: _Optional[int] = ..., likes: _Optional[int] = ..., views: _Optional[int] = ..., liked_by_me: _Optional[bool] = ...) -> None: ...
+    unavailable: bool
+    def __init__(self, post_id: _Optional[int] = ..., likes: _Optional[int] = ..., views: _Optional[int] = ..., liked_by_me: _Optional[bool] = ..., unavailable: _Optional[bool] = ...) -> None: ...
 
 class BatchGetCountersReply(_message.Message):
     __slots__ = ("counters",)

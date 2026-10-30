@@ -9,7 +9,7 @@ class Settings(AuthSettings, DatabaseSettings, RedisSettings):
     local_cache_size: int = 100_000
     max_batch_posts: int = 100
     grpc_port: int = 50051
-    liked_by_timeout_seconds: float = 0.5
+    db_timeout_seconds: float = 0.5
 
 
 @lru_cache

@@ -4,7 +4,7 @@ x-postgres: &postgres
   command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
   shm_size: 256m
   deploy: { resources: { limits: { memory: 1g } } }
-  environment:
+  environment: &postgres-env
     POSTGRES_USER: app
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
     POSTGRES_DB: counters
@@ -13,19 +13,58 @@ x-postgres: &postgres
     interval: 2s
     retries: 15
 
+x-replica: &replica
+  <<: *postgres
+  user: postgres
+  entrypoint: ["/usr/local/bin/replica.sh"]
+  command: []
+  deploy: { resources: { limits: { memory: 512m } } }
+
 services:
   pg-0:
     <<: *postgres
     volumes:
       - pg-0:/var/lib/postgresql
       - ../infra/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ../infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
 
   pg-1:
     <<: *postgres
     volumes:
       - pg-1:/var/lib/postgresql
       - ../infra/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ../infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+
+  pg-0-replica:
+    <<: *replica
+    environment:
+      <<: *postgres-env
+      PRIMARY_HOST: pg-0
+      PGPASSWORD: ${POSTGRES_PASSWORD:-app}
+    volumes:
+      - pg-0-replica:/var/lib/postgresql
+      - ../infra/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ../infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ../infra/postgres/replica.sh:/usr/local/bin/replica.sh:ro
+    depends_on:
+      pg-0: { condition: service_healthy }
+
+  pg-1-replica:
+    <<: *replica
+    environment:
+      <<: *postgres-env
+      PRIMARY_HOST: pg-1
+      PGPASSWORD: ${POSTGRES_PASSWORD:-app}
+    volumes:
+      - pg-1-replica:/var/lib/postgresql
+      - ../infra/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ../infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ../infra/postgres/replica.sh:/usr/local/bin/replica.sh:ro
+    depends_on:
+      pg-1: { condition: service_healthy }
 
 volumes:
   pg-0:
   pg-1:
+  pg-0-replica:
+  pg-1-replica:

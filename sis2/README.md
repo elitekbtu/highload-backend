@@ -1,6 +1,6 @@
 # SIS 2 — счётчик лайков и просмотров
 
-Стек: Python 3.12, FastAPI, aiokafka, redis-py, SQLAlchemy (asyncpg), Alembic, nginx, Kafka (KRaft) ×3, Redis + реплика + Sentinel ×3, PostgreSQL ×2.
+Стек: Python 3.12, FastAPI, aiokafka, redis-py, SQLAlchemy (asyncpg), Alembic, nginx, Kafka (KRaft) ×3, Redis + реплика + Sentinel ×3, PostgreSQL ×2 шарда, у каждого потоковая реплика.
 Монорепо на `uv` workspace: `shared` + три сервиса + миграции.
 
 ## Архитектура
@@ -67,6 +67,7 @@ flowchart LR
 | `GET` | `/api/v1/counters?post_ids=1,2,3` | read | `{"counters": [...]}`, до 100 id |
 
 Если Kafka недоступна, write-эндпоинты отвечают `503` — клиент повторяет запрос.
+В ответе чтения у каждого поста есть поле `unavailable`. Оно `true`, только если поста нет в Redis, а его шард и реплика шарда недоступны: тогда `likes` и `views` равны 0 и верить им нельзя. Остальные посты пачки отдаются как обычно.
 Необязательный заголовок `Idempotency-Key: <UUID>` у записи делает повтор безопасным: событие получит тот же `event_id`, и aggregator посчитает его один раз.
 
 ### gRPC
@@ -179,7 +180,7 @@ Aggregator записывает `likes` и `views` в Redis всегда, даж
 - если aggregator записал раньше — `HSETNX` ничего не перезапишет;
 - если read_service записал раньше устаревшее значение из БД — aggregator перезапишет его абсолютным.
 
-Просмотры, которые ещё не сброшены в Postgres, сразу попадают в Redis, и чтение из БД их не потеряет. Если ключ вытеснен из Redis и заполнен из БД без несброшенной части, значение исправится при следующем просмотре поста или флаше (≤ 10 с).
+Просмотры, которые ещё не сброшены в Postgres, сразу попадают в Redis, и чтение из БД их не потеряет. Счётчики не имеют TTL, а Redis работает с `maxmemory-policy volatile-lru`: при нехватке памяти вытесняются только ключи дедупа, счётчики остаются. Ключ может пропасть только при потере данных Redis, например если при переключении на реплику не успели доехать последние записи. Тогда значение исправится при следующем событии по посту или флаше (≤ 10 с).
 
 При отзыве партиций (rebalance) aggregator забывает кэш сброшенных значений: эти посты теперь пишет другой инстанс.
 
@@ -207,7 +208,8 @@ flowchart TD
 - L1 гасит горячие посты: при всплеске трафика на один пост Redis получает не больше запроса в секунду на инстанс.
 - `HSETNX` дописывает только отсутствующие поля и не перезапишет то, что записал aggregator.
 - Ошибки Redis не валят запрос — сервис деградирует до Postgres.
-- `liked_by_me` всегда читается из Postgres (персональные данные не кэшируются). Если шард недоступен или не ответил за 0.5 с, для его постов возвращается `liked_by_me = false`, а счётчики по-прежнему отдаются из Redis.
+- `liked_by_me` всегда читается из Postgres (персональные данные не кэшируются).
+- Если primary шарда не ответил за 0.5 с, чтение идёт с его реплики, и следующие 5 с primary не опрашивается ([shared/db.py](shared/src/shared/db.py)). Если недоступна и реплика, `liked_by_me = false`, а посты, которых нет в Redis, приходят с `unavailable = true`.
 
 ## Шардирование Postgres
 
@@ -244,7 +246,7 @@ erDiagram
 
 | Redis-ключ | Тип | TTL | Назначение |
 |---|---|---|---|
-| `counter:{post_id}` | hash `likes`, `views` | нет, вытеснение `allkeys-lru` (512 МБ) | кэш счётчиков |
+| `counter:{post_id}` | hash `likes`, `views` | нет, не вытесняется (`volatile-lru`) | кэш счётчиков |
 | `view:{post_id}:{user_id}` | string | 3600 с | дедуп просмотров |
 
 Фигурные скобки — hash tag: при переходе на Redis Cluster ключи одного поста окажутся в одном слоте.
@@ -268,8 +270,8 @@ docker compose up --build
 
 ```mermaid
 flowchart LR
-    pg0[(pg-0)] --> migrate
-    pg1[(pg-1)] --> migrate
+    pg0[(pg-0)] --> migrate & pg0r[(pg-0-replica)]
+    pg1[(pg-1)] --> migrate & pg1r[(pg-1-replica)]
     migrate -- completed --> rs[read_service]
     migrate -- completed --> agg[aggregator]
     redis0[(redis-0)] --> redis1[(redis-1)] & sentinel[(sentinel ×3)]
@@ -287,6 +289,7 @@ flowchart LR
 |---|---|---|
 | Kafka | 3 узла KRaft (broker + controller), у топика 12 партиций с фактором репликации 3, `min.insync.replicas=2`, producer с `acks=all` | Кворум контроллеров (2 из 3) выбирает новых лидеров партиций примерно за 3 с (`broker.session.timeout.ms=3000`). События не теряются |
 | Redis | `redis-0` мастер, `redis-1` реплика, 3 Sentinel с кворумом 2 | Sentinel повышает реплику через ~2 с (`down-after-milliseconds 2000`), сервисы переподключаются к новому мастеру через Sentinel. Пока мастера нет, чтение идёт в Postgres, дедуп пропускает запросы, aggregator ретраит |
+| Postgres | 2 шарда, у каждого потоковая реплика (`pg_basebackup` + `standby.signal`) | Запись ждёт в Kafka, aggregator ретраит, пока primary не вернётся. Чтение идёт с реплики. Если лежат и primary, и реплика, посты шарда, которых нет в Redis, отдаются с `unavailable = true` |
 
 Сервисы подключаются к Redis через Sentinel ([redis_client.py](shared/src/shared/redis_client.py)) с таймаутом сокета 0.5 с, к Kafka — по списку всех брокеров.
 Проверка под нагрузкой — [load/failover.py](load/failover.py): `uv run python load/failover.py kafka-2` или `redis-0` убивает узел посреди потока лайков и сверяет, что ничего не потеряно и не задвоено. Compose собран из файлов в [docker-ymls](docker-ymls), все Python-образы — из одного [python.Dockerfile](docker-ymls/dockerfiles/python.Dockerfile) с аргументами `PACKAGE` и `SRC`.
@@ -310,7 +313,7 @@ curl -s -H "$H" 'localhost:8080/api/v1/counters?post_ids=42,43' | jq
 
 ## Настройки
 
-Общие переменные (из [services.yml](docker-ymls/services.yml)): `DATABASE_URLS` (через запятую), `REDIS_SENTINELS` и `REDIS_MASTER_NAME` (или `REDIS_URL` без Sentinel), `KAFKA_BOOTSTRAP_SERVERS` (через запятую), `KAFKA_TOPIC`, `JWT_SECRET`.
+Общие переменные (из [services.yml](docker-ymls/services.yml)): `DATABASE_URLS` (через запятую), `REDIS_URL` (`redis+sentinel://sentinel-1:26379,.../counters` — список Sentinel'ов и имя мастера), `KAFKA_BOOTSTRAP_SERVERS` (через запятую), `KAFKA_TOPIC`, `JWT_SECRET`.
 
 | Сервис | Переменная | По умолчанию |
 |---|---|---|
@@ -323,7 +326,8 @@ curl -s -H "$H" 'localhost:8080/api/v1/counters?post_ids=42,43' | jq
 | read | `DB_POOL_SIZE` | 20 |
 | read | `LOCAL_CACHE_TTL_SECONDS` / `LOCAL_CACHE_SIZE` | 1.0 / 100 000 |
 | read | `MAX_BATCH_POSTS` | 100 |
-| read | `LIKED_BY_TIMEOUT_SECONDS` — сколько ждать шард для `liked_by_me` | 0.5 |
+| read | `DATABASE_REPLICA_URLS` — реплики шардов в том же порядке, что `DATABASE_URLS` | — |
+| read | `DB_TIMEOUT_SECONDS` — сколько ждать primary шарда, прежде чем идти в реплику | 0.5 |
 | aggregator | `KAFKA_GROUP_ID` / `KAFKA_TOPIC_PARTITIONS` / `KAFKA_REPLICATION_FACTOR` | aggregator / 12 / 3 |
 | aggregator | `BATCH_WINDOW_SECONDS` / `BATCH_MAX_EVENTS` | 1.0 / 10 000 |
 | aggregator | `FLUSH_INTERVAL_SECONDS` | 10.0 |

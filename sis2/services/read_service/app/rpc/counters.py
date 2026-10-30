@@ -35,5 +35,9 @@ class CountersRpc:
 
 def to_message(counters: PostCounters) -> pb.PostCounters:
     return pb.PostCounters(
-        post_id=counters.post_id, likes=counters.likes, views=counters.views, liked_by_me=counters.liked_by_me
+        post_id=counters.post_id,
+        likes=counters.likes,
+        views=counters.views,
+        liked_by_me=counters.liked_by_me,
+        unavailable=counters.unavailable,
     )

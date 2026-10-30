@@ -1,7 +1,6 @@
 x-app-env: &app-env
   DATABASE_URLS: postgresql+asyncpg://app:${POSTGRES_PASSWORD:-app}@pg-0:5432/counters,postgresql+asyncpg://app:${POSTGRES_PASSWORD:-app}@pg-1:5432/counters
-  REDIS_SENTINELS: sentinel-1:26379,sentinel-2:26379,sentinel-3:26379
-  REDIS_MASTER_NAME: counters
+  REDIS_URL: redis+sentinel://sentinel-1:26379,sentinel-2:26379,sentinel-3:26379/counters
   KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
   KAFKA_TOPIC: counter-events
   JWT_SECRET: ${JWT_SECRET:-change-me-jwt}
@@ -44,7 +43,9 @@ services:
     healthcheck: *http-healthcheck
     restart: unless-stopped
     deploy: { resources: { limits: { memory: 256m } } }
-    environment: *app-env
+    environment:
+      <<: *app-env
+      DATABASE_REPLICA_URLS: postgresql+asyncpg://app:${POSTGRES_PASSWORD:-app}@pg-0-replica:5432/counters,postgresql+asyncpg://app:${POSTGRES_PASSWORD:-app}@pg-1-replica:5432/counters
     depends_on:
       sentinel-1: { condition: service_healthy }
       sentinel-2: { condition: service_healthy }
@@ -59,7 +60,9 @@ services:
     command: ["python", "-m", "app.main"]
     restart: unless-stopped
     deploy: { resources: { limits: { memory: 256m } } }
-    environment: *app-env
+    environment:
+      <<: *app-env
+      DATABASE_REPLICA_URLS: postgresql+asyncpg://app:${POSTGRES_PASSWORD:-app}@pg-0-replica:5432/counters,postgresql+asyncpg://app:${POSTGRES_PASSWORD:-app}@pg-1-replica:5432/counters
     depends_on:
       sentinel-1: { condition: service_healthy }
       sentinel-2: { condition: service_healthy }

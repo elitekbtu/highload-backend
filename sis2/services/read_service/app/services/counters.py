@@ -8,7 +8,6 @@ from pydantic import BaseModel
 from shared.db import ShardedDatabase
 from shared.models import Like, PostCounter
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.services.cache import CounterCache
@@ -35,14 +34,15 @@ class PostCounters(BaseModel):
     likes: int
     views: int
     liked_by_me: bool
+    unavailable: bool = False
 
 
 class CountersService:
-    def __init__(self, db: ShardedDatabase, cache: CounterCache, local: LocalCache, liked_by_timeout: float):
+    def __init__(self, db: ShardedDatabase, cache: CounterCache, local: LocalCache, db_timeout: float):
         self.db = db
         self.cache = cache
         self.local = local
-        self.liked_by_timeout = liked_by_timeout
+        self.db_timeout = db_timeout
 
     async def get_many(self, post_ids: list[int], user_id: int) -> list[PostCounters]:
         counters, liked = await asyncio.gather(self._counters(post_ids), self._liked_by(user_id, post_ids))
@@ -53,6 +53,8 @@ class CountersService:
                 views=counters[post_id][1],
                 liked_by_me=post_id in liked,
             )
+            if post_id in counters
+            else PostCounters(post_id=post_id, likes=0, views=0, liked_by_me=False, unavailable=True)
             for post_id in post_ids
         ]
 
@@ -84,21 +86,26 @@ class CountersService:
             }
 
         loaded: dict[int, Counters] = {}
-        for shard_counters in await self.db.map_shards(post_ids, load_shard):
-            loaded |= shard_counters
+        for ids, result in await self.db.read_shards(post_ids, load_shard, self.db_timeout):
+            if isinstance(result, Exception):
+                logger.warning("counters unavailable for %d posts", len(ids), exc_info=result)
+            else:
+                loaded |= result
         return loaded
 
     async def _liked_by(self, user_id: int, post_ids: list[int]) -> set[int]:
         async def load_shard(engine: AsyncEngine, ids: list[int]) -> set[int]:
             stmt = select(Like.post_id).where(Like.post_id.in_(ids), Like.user_id == user_id)
-            try:
-                async with asyncio.timeout(self.liked_by_timeout), engine.connect() as conn:
-                    return set((await conn.scalars(stmt)).all())
-            except (SQLAlchemyError, OSError, TimeoutError):
-                logger.warning("liked_by_me unavailable for %d posts", len(ids), exc_info=True)
-                return set()
+            async with engine.connect() as conn:
+                return set((await conn.scalars(stmt)).all())
 
-        return set().union(*await self.db.map_shards(post_ids, load_shard))
+        liked: set[int] = set()
+        for ids, result in await self.db.read_shards(post_ids, load_shard, self.db_timeout):
+            if isinstance(result, Exception):
+                logger.warning("liked_by_me unavailable for %d posts", len(ids), exc_info=result)
+            else:
+                liked |= result
+        return liked
 
 
 async def get_counters_service(request: Request) -> CountersService:

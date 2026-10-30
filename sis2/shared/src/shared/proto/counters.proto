@@ -50,6 +50,7 @@ message PostCounters {
   int64 likes = 2;
   int64 views = 3;
   bool liked_by_me = 4;
+  bool unavailable = 5;
 }
 
 message BatchGetCountersReply {
