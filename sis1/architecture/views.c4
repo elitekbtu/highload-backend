@@ -1,153 +1,267 @@
 views {
   view index {
-    title '01 · Архитектура / C1 · Контекст'
+    title '01 · Требования / Контекст'
     description '''
-      **SIS1: точные счётчики лайков и просмотров.**
+      **Design Like & View Counter**
 
-      Один пользователь может добавить один лайк и один просмотр на пост за всё время.
-      Дубли запросов и повторная доставка Kafka сохраняют результат.
+      **Функциональные требования**
+      1. Пользователь ставит и снимает лайк. Один лайк на пост от одного пользователя.
+      2. Просмотр засчитывается, если видео смотрели ≥ 20 с (или ≥ 50% длины, если видео короче),
+         а обычный пост был на экране ≥ 2 с. Просмотры одного пользователя одного поста — не чаще раза в 1 ч.
+      3. Пользователь получает число лайков и просмотров поста и признак liked_by_me.
+      4. Пользователь получает счётчики многих постов одним запросом (для ленты).
 
-      **Цели:** 20 000 инкрементов/с; 50 млн постов; видимость p99 ≤ 2 с.
-      Допущения: приём p99 ≤ 150 мс, чтение p99 ≤ 100 мс в штатном режиме.
-      В прототипе подтверждён только короткий профиль 1000 RPS.
-
-      Откройте SIS1, чтобы перейти к сервисам, затем внутрь API или worker.
-      Синие узлы — API; зелёные — обработка; янтарные — Kafka;
-      фиолетовые — постоянные данные; розовые — кэш и ошибки.
+      **Нефункциональные требования**
+      1. ≈ 20 000 RPS инкрементов (лайки + просмотры).
+      2. ≈ 44 000 RPS чтений: счётчики показываются на каждом посте ленты.
+      3. Объём: 50 млн постов со счётчиками.
+      4. Eventual consistency: новый лайк или просмотр виден ≤ 2 с.
+      5. Чтение счётчиков p99 < 50 мс.
+      6. Доступность 99,99%. Отказ одного компонента не теряет события.
+      7. Лайки точные. Просмотры допускают погрешность < 1%.
     '''
-    include client, counters, operator
+    include user, idp, operator, platform
     autoLayout LeftRight
   }
 
-  view containers of counters {
-    title '01 · Архитектура / C2 · Сервисы'
+  view capacity of platform {
+    title '02 · Требования / Оценка нагрузки и объёма'
     description '''
-      **Реализовано в Compose.** API и worker — отдельные процессы.
-      Kafka хранит принятые события; PostgreSQL обеспечивает точную дедупликацию.
-      Redis содержит только кэш. Worker не обновляет Redis: значение освежается по TTL.
+      **Запись**
+      - Просмотры: 20 000 × 90% = 18 000 RPS, пик ×3 = 54 000.
+      - Лайки: 20 000 × 10% = 2 000 RPS, пик ×3 = 6 000.
+      - В сутки: 20 000 × 86 400 ≈ 1,7 млрд запросов.
 
-      202 подтверждает Kafka ack. Изменение счётчика происходит позже в транзакции worker.
-      Откройте API, worker, Kafka или PostgreSQL для следующего уровня детализации.
+      **Реальный HTTP-трафик просмотров.** Засчитанный просмотр — два запроса (view_started + view_finished).
+      Пролистанный пост — только view_started. 18 000 × 2 + 10 800 (ещё 60% view_started при пролистывании)
+      ≈ 47 000 RPS, пик ≈ 141 000.
+
+      **Чтение.** Показы постов: 18 000 + 10 800 ≈ 29 000 RPS. С профилем и поиском ×1,5 ≈ 44 000 RPS, пик ≈ 132 000.
+      **DAU** ≈ 1,7 млрд / 220 запросов на пользователя (200 просмотров + 20 лайков) ≈ 7,8 млн.
+
+      **Размеры записей:** строка likes 24 Б → 50 Б с накладными; post_counters 32 Б → 50 Б;
+      ключ Redis ≈ 100 Б; событие Kafka ≈ 100 Б. В среднем 20 лайков на пост.
+
+      **Хранилища**
+      - post_counters: 50 млн × 50 Б ≈ 2,5 ГБ.
+      - likes: 50 млн × 20 × 50 Б ≈ 47 ГБ; рост 2 000 × 86 400 × 50 Б ≈ 8 ГБ/сутки ≈ 3 ТБ/год.
+      - Redis: счётчики 5 ГБ + dedup просмотров за 1 ч 6,5 ГБ + ключи событий за 1 ч 7 ГБ ≈ 19 ГБ.
+        Окно dedup 24 ч стоило бы ≈ 155 ГБ, поэтому выбран 1 ч.
+      - Kafka: 20 000 × 86 400 × 7 × 100 Б ≈ 1,1 ТБ, с RF 3 ≈ 3,3 ТБ.
+
+      **Выводы.** Redis целиком помещается в память небольшого кластера, поэтому все чтения идут в Redis.
+      likes растёт на 3 ТБ/год → шардирование по post_id. post_counters маленькая, но часто пишется:
+      шарды вместе с likes. Kafka — несколько брокеров.
     '''
-    include client, counters.api, counters.kafka, counters.worker, counters.postgres, counters.redis
-    include counters.api -> counters.kafka with { title 'Событие · acks=all'; color busAmber; line solid }
-    include counters.kafka -> counters.worker with { title 'Пакет ≤ 500'; color workerGreen; line solid }
-    include counters.worker -> counters.kafka with { title 'DLQ + offsets'; color busAmber }
-    include counters.api -> counters.postgres with { title 'Посты и cache miss'; color dataViolet }
-    include counters.worker -> counters.postgres with { title 'UNIQUE + счётчики'; color dataViolet; line solid }
+    include user, platform.gateway, platform.writeSvc, platform.readSvc, platform.kafka
+    include platform.aggregator, platform.redis, platform.db
     autoLayout LeftRight
   }
 
-  view api_components of counters.api {
-    title '01 · Архитектура / C3 · API'
-    description 'Реальные модули одного процесса FastAPI. Приём события и чтение счётчиков используют общий CounterCache. POST /post создаёт пост в PostgreSQL напрямую; Kafka используется для лайков и просмотров.'
-    include client, counters.api.*, counters.kafka.events, counters.redis, counters.postgres
-    autoLayout LeftRight
-  }
-
-  view worker_components of counters.worker {
-    title '01 · Архитектура / C3 · Worker'
-    description 'Логические этапы worker.run() и функция apply_events(), выполняемые одним процессом. Весь пакет удерживается при ошибке БД; повторяется с backoff от 100 мс до 2 с. Невалидные события не блокируют пакет после подтверждённой отправки в DLQ.'
-    include counters.worker.*, counters.kafka.*, counters.postgres
-    autoLayout LeftRight
-  }
-
-  view kafka_topics of counters.kafka {
-    title '01 · Архитектура / Kafka · События и offsets'
-    description 'Три разных назначения топиков: входящие события, отклонённые записи и позиция чтения группы. Idempotent producer подавляет транспортные повторы; бизнес-дедупликацию выполняет UNIQUE в PostgreSQL. Retention журнала не заменяет backup истории взаимодействий.'
-    include counters.api.publisher, counters.kafka.*, counters.worker.consumer, counters.worker.completion
-    autoLayout LeftRight
-  }
-
-  view data_model of counters.postgres {
-    title '01 · Архитектура / Данные · Ключи и инварианты'
+  view containers of platform {
+    title '03 · Архитектура / Контейнеры'
     description '''
-      **Одна PostgreSQL БД в прототипе.** UNIQUE(post_id, user_id) действует отдельно для likes и views.
-      INSERT ON CONFLICT DO NOTHING RETURNING возвращает только новые взаимодействия.
-      Эти строки и UPSERT полос коммитятся одной транзакцией: дубль даёт нулевое приращение.
+      **Запись:** Gateway → Write Service → Kafka (по post_id) → Aggregator Workers → Redis и Database.
+      **Чтение:** Gateway → Read Service → локальный кэш → Redis → Database при промахе.
 
-      16 полос снижают конкуренцию за популярный пост. Они не уменьшают объём бессрочной дедупликации.
-      API удаления нет. При прямом удалении пользователя CASCADE удалит взаимодействия,
-      но сам по себе не пересчитает агрегаты: для поддержки удаления нужен отдельный алгоритм.
+      Write Service отвечает после Kafka ack и не ждёт подсчёта. Aggregator суммирует события окна 1 с
+      и делает один HINCRBY на пост вместо тысячи.
+
+      **Бюджет видимости 2 с:** Kafka ack и доставка ≈ 200 мс + окно агрегации ≤ 1 с
+      + локальный кэш горячих постов ≤ 500 мс + запас ≈ 300 мс.
     '''
-    include counters.postgres.*
+    include user, idp, operator
+    include platform.gateway, platform.writeSvc, platform.readSvc, platform.kafka
+    include platform.aggregator, platform.redis, platform.db, platform.observability
     autoLayout LeftRight
   }
-}
 
-views {
-  dynamic view increment {
-    title '02 · Сценарии / Запись · Приём и дедупликация'
-    description 'Показан cache hit для наличия поста. При cache miss API проверяет posts; отсутствующий пост даёт 404 до публикации. Новый запрос на ту же пару получает новый event_id, но бизнес-ключ остаётся прежним.'
-    variant sequence
-    client -> counters.api 'POST /like или /view'
-    counters.api -> counters.redis 'Пост существует?'
-    counters.api <- counters.redis 'Да · cache hit'
-    counters.api -> counters.kafka.events 'send_and_wait' {
-      notes 'Ключ post_id:username; acks=all, min ISR 2. 429 при переполнении pending, 503 при отсутствии ack.'
-    }
-    counters.api <- counters.kafka.events 'Kafka ack'
-    client <- counters.api '202 Accepted + event_id'
-    counters.kafka.events -> counters.worker 'Пакет событий'
-    counters.worker -> counters.postgres 'BEGIN · users · INSERT RETURNING'
-    alt {
-      when 'Новое взаимодействие' {
-        counters.worker -> counters.postgres 'UPSERT stripe = user_id % 16'
-      }
-      else 'Повтор пользователя на пост' {
-        counters.worker -> counters.postgres '0 новых строк → 0 инкрементов'
-      }
-    }
-    counters.worker -> counters.postgres 'COMMIT'
-    counters.worker -> counters.kafka.offsets 'Commit offsets' {
-      navigateTo replay
-    }
+  view data_model of platform {
+    title '04 · Архитектура / Данные, ключи Redis, событие Kafka'
+    description '''
+      **likes** — PK (post_id, user_id): одна пара — один лайк. INSERT … ON CONFLICT DO NOTHING
+      и DELETE … RETURNING возвращают, изменилось ли состояние, и только тогда меняется likes_count.
+
+      **post_counters** — снимок счётчиков. Для лайков это источник истины: обновляется в той же транзакции,
+      что и likes. Для просмотров — снимок Redis раз в 10–30 с.
+
+      **Redis**
+      - counter:{post_id} — HASH {likes, views}, главный источник чтений.
+      - view:{post_id}:{user_id} — dedup просмотров на 1 ч (ФТ 2).
+      - evt:{post_id}:{event_id} — dedup повторной доставки Kafka на 1 ч.
+        Хеш-тег {post_id} кладёт ключ в один слот со счётчиком, поэтому Lua-скрипт атомарен.
+
+      **Событие Kafka** ≈ 41 Б полезных данных: event_id UUID, type like/unlike/view, post_id, user_id, timestamp.
+      Ключ партиции — post_id.
+    '''
+    include platform.db.*, platform.redis.*, platform.kafka.events
+    autoLayout LeftRight
   }
 
-  dynamic view read_counter {
-    title '02 · Сценарии / Чтение · Кэш и fallback'
-    description 'SET NX не продлевает жизнь старого значения. TTL 300 мс уменьшается на время чтения БД. Ошибка Redis обрабатывается как cache miss. Полная задержка видимости также включает очередь и обработку worker.'
-    variant sequence
-    client -> counters.api 'GET /post/{id}'
-    counters.api -> counters.redis 'GET counter:v1:{id}'
-    alt {
-      when 'Cache hit' {
-        counters.api <- counters.redis 'Готовый JSON'
-        client <- counters.api '200 · счётчики'
-      }
-      else 'Cache miss или Redis недоступен' {
-        counters.api -> counters.postgres 'SELECT post + SUM ≤ 16 полос'
-        counters.api <- counters.postgres 'Пост и счётчики'
-        opt 'Redis доступен и остаток TTL > 0' {
-          counters.api -> counters.redis 'SET NX · остаток от 300 мс'
-        }
-        client <- counters.api '200 · счётчики'
-      }
-    }
+  view api of platform {
+    title '05 · Интерфейс / API и выбор протокола'
+    description '''
+      **Внешний API — REST/JSON (Authorization: Bearer)**
+      - PUT /api/v1/posts/{post_id}/like → 202 Accepted (пустое тело)
+      - DELETE /api/v1/posts/{post_id}/like → 202 Accepted
+      - POST /api/v1/posts/{post_id}/view_started → 200 { "view_token": "…" }
+      - POST /api/v1/posts/{post_id}/view_finished { "view_token": "…" } → 202 Accepted | 400 Bad Request
+      - GET /api/v1/posts/{post_id}/counters → 200 { "post_id": 777, "likes": 120, "views": 5400, "liked_by_me": true }
+      - GET /api/v1/counters?post_ids=777,778,779 → 200 { "counters": [ … ] }
+
+      **Внутренний интерфейс — gRPC** (Gateway → Write/Read Service), пакет counter.v1:
+      SetLike, RemoveLike, StartView, FinishView, GetCounters, BatchGetCounters.
+      Envoy транскодирует REST в gRPC по аннотациям google.api.http того же .proto, второго контракта нет.
+
+      **Почему gRPC внутри**
+      - 47 000–141 000 RPS мелких запросов. Protobuf короче JSON: varint вместо цифр текстом, номера полей вместо имён.
+      - HTTP/2: десятки тысяч RPS идут через несколько мультиплексированных соединений, а не через пул TCP-соединений.
+      - Deadline передаётся по сети (grpc-timeout), сервис видит остаток и не делает бесполезную работу.
+      - Ретраи, hedging и retry throttling задаются в service config, коды статуса однозначно делятся на повторяемые и нет.
+
+      **Почему REST снаружи.** Браузеры и мобильные клиенты, кэширование, отладка через curl.
+
+      **Отклонено**
+      - WebSocket: взаимодействие запрос-ответ без push; stateful-соединения мешают балансировке и ретраям.
+        Кандидат для live-счётчиков открытого поста.
+      - Голый HTTP/2: формат, ошибки, deadline и ретраи пришлось бы изобретать вручную.
+
+      **SIS2:** Write и Read Service на Python (grpc.aio + FastAPI в одном процессе) отдают оба интерфейса — gRPC и REST/JSON — поверх одних use cases.
+      REST — baseline для замеров латентности и размера payload.
+    '''
+    include user, bench, platform.gateway, platform.writeSvc, platform.readSvc
+    autoLayout LeftRight
   }
 
-  dynamic view replay {
-    title '02 · Сценарии / Сбой · Replay после commit'
-    description 'Между PostgreSQL и Kafka нет распределённой транзакции. Эффект в БД идемпотентен благодаря уникальности взаимодействий. При сбое до DB commit весь пакет откатывается; здесь показан более сложный сбой после commit.'
-    variant sequence
-    counters.kafka.events -> counters.worker 'Пакет N'
-    counters.worker -> counters.postgres 'Новые взаимодействия + полосы · COMMIT'
-    counters.worker -> counters.worker 'Сбой до commit offsets'
-    counters.kafka.events -> counters.worker 'Пакет N · повтор после рестарта'
-    counters.worker -> counters.postgres 'UNIQUE → 0 новых строк · COMMIT'
-    counters.worker -> counters.kafka.offsets 'Commit offsets · счётчики прежние'
+  view write_components of platform.writeSvc {
+    title '06 · Компоненты / Write Service'
+    description '''
+      **Лайк:** PUT и DELETE задают состояние, поэтому повтор безопасен. Точность гарантирует PK в likes.
+      **Просмотр:** токен подтверждает, что прошло нужное время, а SET NX view:{post_id}:{user_id}
+      отсекает повторы в течение часа. Уже засчитанный просмотр → 200 OK без события.
+
+      **Если Kafka не подтвердила событие** — DEL view-ключа и UNAVAILABLE: клиент повторяет с тем же токеном.
+      event_id детерминирован (UUIDv5 от jti токена), поэтому если первая отправка всё-таки дошла,
+      дубль отбросит Aggregator по evt-ключу.
+    '''
+    include platform.gateway, platform.writeSvc.*, platform.redis.viewKey, platform.kafka.events
+    autoLayout LeftRight
   }
 
-  dynamic view rejected_event {
-    title '02 · Сценарии / Ошибки · DLQ и порядок подтверждений'
-    description 'Один пакет может содержать валидные и отклонённые записи. При недоступности DLQ offsets остаются прежними, worker перезапускается; уже применённые записи безопасно повторяются. DLQ может содержать повторные письма.'
-    variant sequence
-    counters.kafka.events -> counters.worker 'Пакет: валидные + ошибка схемы'
-    counters.worker -> counters.worker 'Проверить EngagementEvent'
-    counters.worker -> counters.postgres 'Применить валидные; отклонить отсутствующие посты'
-    counters.worker <- counters.postgres 'DB commit'
-    counters.worker -> counters.kafka.dlq 'Ошибки схемы + отсутствующие посты'
-    counters.worker <- counters.kafka.dlq 'DLQ ack'
-    counters.worker -> counters.kafka.offsets 'Commit offsets всего пакета'
+  view read_components of platform.readSvc {
+    title '06 · Компоненты / Read Service'
+    description '''
+      **BatchGetCounters (лента):** локальный кэш → один pipeline HGETALL в Redis Cluster →
+      промахи одним SELECT … WHERE post_id = ANY(…) на реплику шарда → запись обратно в Redis.
+      liked_by_me — один PK-lookup на шард для всех постов пакета.
+
+      **Ошибка Redis** обрабатывается как промах: чтение уходит в post_counters, ответ медленнее, но корректный.
+    '''
+    include platform.gateway, platform.readSvc.*, platform.redis.counterKey, platform.db.*
+    autoLayout LeftRight
+  }
+
+  view aggregator_components of platform.aggregator {
+    title '06 · Компоненты / Aggregator Workers'
+    description '''
+      **Лайки — точно.** Транзакция на шард: INSERT/DELETE RETURNING → likes_count += Δ RETURNING.
+      В Redis пишется HSET абсолютным значением из БД, поэтому повторная обработка не меняет результат.
+
+      **Просмотры — быстро.** Окно 1 с, один Lua-вызов на пост: SET NX evt-ключей событий окна
+      и HINCRBY на число новых. Раз в 10–30 с views_count переносится в post_counters абсолютным значением.
+
+      **Offsets коммитятся после снимка.** После сбоя агрегатор перечитывает события с последнего снимка:
+      лайки защищены PK, просмотры — evt-ключами.
+    '''
+    include platform.kafka.*, platform.aggregator.*, platform.redis.counterKey, platform.redis.eventKey, platform.db.*
+    autoLayout LeftRight
+  }
+
+  view scaling of platform {
+    title '07 · Эксплуатация / Масштабирование'
+    description '''
+      **Горизонтально:** добавляются узлы, а не мощность одного сервера.
+      - Gateway, Write и Read Service без состояния → больше инстансов за балансировщиком.
+      - Kafka масштабируется партициями. Ключ post_id: все события поста — в одну партицию и к одному агрегатору,
+        поэтому подсчёт без гонок.
+      - Aggregator Workers — до одного на партицию в consumer group.
+      - Redis Cluster шардирован по post_id, у каждого шарда реплика.
+      - Database шардирована по post_id: все лайки поста на одном шарде,
+        проверка дубля — один запрос к одному шарду.
+
+      **Число инстансов** = ceil(пиковый RPS / RPS одного пода, измеренный в SIS2) × 1,5 запаса,
+      распределённых по зонам так, чтобы потеря зоны не опустила ниже пика.
+    '''
+    include platform.gateway, platform.writeSvc, platform.readSvc, platform.kafka
+    include platform.aggregator, platform.redis, platform.db
+    autoLayout LeftRight
+  }
+
+  view caching of platform {
+    title '07 · Эксплуатация / Стратегия кэширования'
+    description '''
+      - **Redis — главное хранилище чтений.** Все 50 млн счётчиков (≈ 5 ГБ) в памяти, чтение 1–2 мс, p99 < 50 мс.
+      - **Cache-aside на чтении:** Read Service → HGETALL counter:{post_id}; промах → post_counters → обратно в Redis.
+      - **Write-behind:** Aggregator держит +N в памяти 1 с и делает один HINCRBY на пост.
+        Снимок в post_counters каждые 10–30 с.
+      - **Dedup-кэш:** view:{post_id}:{user_id} с TTL 1 ч (≈ 6,5 ГБ). 1 ч вместо 24 ч экономит ≈ 150 ГБ RAM.
+      - **Горячие посты:** локальный кэш в Read Service с TTL 500 мс — внутри бюджета 2 с.
+      - **Клиент:** optimistic +1 после лайка. Клиент помнит посты, просмотренные за последний час,
+        и не отправляет просмотр повторно.
+      - **Вытеснение:** allkeys-lru только как страховка, в штатном режиме все счётчики помещаются в память.
+    '''
+    include platform.readSvc, platform.aggregator, platform.writeSvc, platform.redis.*, platform.db.postCounters
+    autoLayout LeftRight
+  }
+
+  view failures of platform {
+    title '07 · Эксплуатация / Отказы'
+    description '''
+      - **Узел Redis упал** → Cluster промоутит реплику. Чтения временно идут в post_counters.
+        Dedup просмотров ненадолго выключен → небольшая погрешность просмотров (НФТ 7).
+      - **Данные Redis потеряны** → счётчики восстанавливаются из post_counters + replay Kafka (retention 7 суток).
+      - **Aggregator упал** → offsets закоммичены только после снимка, партиции забирает другой worker.
+        Повторы отсекаются: лайки — PK, просмотры — evt:{post_id}:{event_id}.
+      - **Брокер Kafka упал** → RF 3, acks=all, min ISR 2, выбирается новый лидер, события не теряются.
+      - **Consumer lag > 2 с** → нарушен НФТ 4. Алерт по lag, автомасштабирование агрегаторов, больше партиций.
+      - **Шард БД упал** → реплика становится primary. События ждут в Kafka, чтения обслуживает Redis.
+      - **Вирусный пост** → агрегация в памяти + локальный кэш. При необходимости счётчик делится на N подключей и суммируется при чтении.
+      - **Боты и накрутка** → rate limit на Gateway (429), подписанный view token, проверка времени на сервере.
+      - **Двойной клик на лайк** → PUT идемпотентен + PK (post_id, user_id).
+    '''
+    include platform.gateway, platform.writeSvc, platform.readSvc, platform.kafka
+    include platform.aggregator, platform.redis, platform.db, platform.observability
+    autoLayout LeftRight
+  }
+
+  view resilience of platform {
+    title '08 · SIS2 / Таймауты, ретраи, идемпотентность'
+    description '''
+      **Deadline**
+      - Клиент → Gateway: 1 с общий.
+      - Gateway → Write Service: per-try 300 мс, ≤ 3 попытки, route timeout 900 мс.
+        Внутри: Redis 20 мс, Kafka ack ≤ min(200 мс, остаток − 20 мс).
+      - Gateway → Read Service: deadline 100 мс. Redis 20 мс, БД 50 мс.
+        Hedging через 30 мс (≈ p95), maxAttempts 2 — допустим только для чтения.
+      - Остаток deadline < 20 мс на входе → сразу DEADLINE_EXCEEDED, без работы.
+
+      **Ретраи — только на одном уровне (Gateway)**
+      - Повторяются: UNAVAILABLE, DEADLINE_EXCEEDED на попытке, если остался общий deadline.
+      - RESOURCE_EXHAUSTED — только по grpc-retry-pushback-ms от сервера.
+      - Никогда: INVALID_ARGUMENT, UNAUTHENTICATED, NOT_FOUND, FAILED_PRECONDITION.
+      - Backoff 25 → 250 мс с jitter. Retry budget 20% активных запросов, retryThrottling (10 токенов, 0,1).
+
+      **Коды → HTTP:** OK 200/202 · INVALID_ARGUMENT 400 · UNAUTHENTICATED 401 · NOT_FOUND 404 ·
+      FAILED_PRECONDITION 400 (просроченный или чужой view token) · RESOURCE_EXHAUSTED 429 · UNAVAILABLE 503 · DEADLINE_EXCEEDED 504.
+
+      **Идемпотентность по операциям**
+      - SetLike / RemoveLike — задают состояние; PK (post_id, user_id) делает повтор безвредным.
+      - FinishView — ключ идемпотентности это сам view token: event_id = UUIDv5(jti), dedup по view-ключу.
+      - Kafka producer с enable.idempotence: внутренние ретраи не дублируют запись в партиции.
+      - Aggregator: повторная доставка → лайки 0 строк по PK, просмотры 0 по evt-ключу.
+    '''
+    include platform.gateway, platform.writeSvc, platform.readSvc
+    include platform.kafka.events, platform.aggregator, platform.redis, platform.db
+    autoLayout LeftRight
   }
 }

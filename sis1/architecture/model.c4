@@ -1,146 +1,225 @@
 model {
-  client = person 'Пользователь' {
-    description 'Один лайк и один просмотр на пост за всё время.'
+  user = person 'User App' {
+    description 'Web / Mobile. Лайк и снятие лайка, просмотр поста, счётчики ленты. Optimistic +1 после лайка.'
   }
-  operator = person 'Оператор' {
-    description 'Миграции, метрики, consumer lag и восстановление.'
+  operator = person 'SRE / оператор' {
+    description 'Consumer lag, failover, восстановление Redis из БД и Kafka.'
+  }
+  idp = external 'Identity provider' {
+    technology 'OIDC · JWT'
+    description 'Выдаёт access token. Claim sub — стабильный user_id.'
+  }
+  bench = tool 'Bench harness' {
+    #sis2
+    technology 'Python 3.12 · grpc.aio · httpx · hdrhistogram'
+    description 'Один генератор нагрузки для gRPC и REST/JSON: одинаковые сценарии, конкурентность и прогрев. По процессу на ядро, чтобы клиент не стал узким местом.'
   }
 
-  counters = system 'SIS1 · счётчики постов' {
-    description '20 000 RPS · 50 млн постов · видимость p99 ≤ 2 с. Целевые требования; прототип проверен коротким профилем 1000 RPS.'
+  platform = system 'Like & View Counter' {
+    description 'Regional backend. 20 000 инкрементов/с, 44 000 чтений/с, 50 млн постов. Счётчик виден ≤ 2 с, чтение p99 < 50 мс, 99,99%.'
 
-    api = service 'Async API' {
-      technology 'FastAPI · Python 3.12'
-      description 'Принимает события и читает счётчики. Ответ 202 после Kafka ack.'
+    gateway = gateway 'API Gateway' {
+      technology 'Envoy · LB · TLS'
+      description 'JWT → user_id. Rate limit (429). REST/JSON снаружи → gRPC внутрь. Ретраи с retry budget.'
+    }
 
-      http = component 'HTTP routes' {
-        technology 'routes/like.py · view.py · post.py'
-        description 'Pydantic-валидация. POST /like, POST /view, POST и GET /post/.'
+    writeSvc = service 'Write Service' {
+      #sis2
+      technology 'Python 3.12 · grpc.aio + FastAPI · uvloop · stateless'
+      description 'Лайк, снятие лайка, view_started и view_finished. Проверяет view token, дедуплицирует просмотр, публикует событие в Kafka.'
+
+      likeHandler = component 'Like / Unlike' {
+        #sis2
+        technology 'SetLike · RemoveLike'
+        description 'Идемпотентны по смыслу: задают состояние, а не прибавляют. event_id = UUIDv7 из Idempotency-Key.'
       }
-      accept = component 'Приём события' {
-        technology 'routes/engagement.py'
-        description 'Проверяет пост. Создаёт event_id, kind и accepted_at_ms.'
+      viewTokens = component 'View token' {
+        #sis2
+        technology 'HMAC-SHA256'
+        description 'StartView выдаёт подписанный token {jti, user_id, post_id, started_at, min_ms}. FinishView проверяет подпись, user_id и прошедшее время.'
       }
-      publisher = component 'EventPublisher' {
-        technology 'services/publisher.py · aiokafka'
-        description 'acks=all, idempotence, LZ4. Лимит pending → 429; таймаут ack → 503.'
+      viewDedup = component 'View dedup' {
+        #sis2
+        technology 'redis.asyncio · SET NX EX 3600'
+        description 'Новый ключ view:{post_id}:{user_id} → событие. Ключ уже есть → 200 OK без события.'
       }
-      posts = component 'Посты и счётчики' {
-        technology 'routes/post.py · AsyncSession'
-        description 'Создание и cursor pagination. На cache miss читает SUM до 16 полос.'
-      }
-      cache = component 'CounterCache' {
-        technology 'services/cache.py · redis.asyncio'
-        description 'SET NX, таймаут 50 мс. Ошибка Redis → чтение PostgreSQL.'
-        style { color cacheRose }
+      publisher = component 'Event publisher' {
+        #sis2
+        technology 'aiokafka · acks=all · idempotence'
+        description 'Ключ партиции post_id. Ждёт ack не дольше остатка deadline. Нет ack → откат dedup-ключа и UNAVAILABLE.'
       }
     }
-    worker = service 'Counter workers' {
-      technology 'aiokafka · SQLAlchemy async'
-      description 'Группа counter-workers-v1. Пакеты до 500 событий; poll 100 мс.'
-      style { color workerGreen }
 
-      consumer = component 'Чтение пакета' {
-        technology 'worker.py · getmany()'
-        description 'Автоматический commit выключен. Пакет удерживается до успешной обработки.'
-        style { color workerGreen }
+    readSvc = service 'Read Service' {
+      #sis2
+      technology 'Python 3.12 · grpc.aio + FastAPI · uvloop · stateless'
+      description 'Счётчики поста и пакет счётчиков для ленты, liked_by_me.'
+
+      countersQuery = component 'Counters query' {
+        #sis2
+        technology 'GetCounters · BatchGetCounters ≤ 100'
+        description 'Собирает ответ из локального кэша, Redis и БД.'
       }
-      decoder = component 'Валидация события' {
-        technology 'worker.py · EngagementEvent'
-        description 'Валидные события → транзакция. Ошибки схемы → список dead letters.'
-        style { color workerGreen }
+      localCache = component 'Hot post cache' {
+        #sis2
+        technology 'cachetools.TTLCache · TTL 500 мс'
+        description 'Горячие посты читаются из памяти пода. 500 мс вместо 1 с — чтобы окно агрегации 1 с + кэш уложились в 2 с.'
       }
-      transaction = component 'Применение пакета' {
-        technology 'services/engagements.py · apply_events()'
-        description 'Одна транзакция: users, UNIQUE likes/views и приращения post_counters.'
-        style { color workerGreen }
-      }
-      completion = component 'Завершение пакета' {
-        technology 'worker.py · send_and_wait() / commit()'
-        description 'DB commit → DLQ ack → commit offsets. При ошибке replay безопасен.'
-        style { color workerGreen }
+      likedByMe = component 'liked_by_me' {
+        #sis2
+        technology 'asyncpg · PK lookup'
+        description 'SELECT по (post_id, user_id) на шардах постов пакета. Для ленты — один запрос на шард.'
       }
     }
+
     kafka = queue 'Kafka' {
-      technology '3 brokers · Kafka 4.1.2'
-      description 'RF 3 · min ISR 2. Ключ post_id:username распределяет горячий пост.'
+      technology '3+ brokers · RF 3 · min ISR 2'
+      description 'Буфер между приёмом и подсчётом. Ключ post_id: все события поста попадают в одну партицию и к одному агрегатору.'
 
-      events = queue 'engagements' {
-        technology '64 partitions · retention 72 ч'
-        description 'event_id, post_id, username, kind, accepted_at_ms. At least once.'
+      events = topic 'engagement-events' {
+        technology 'Партиции по post_id · retention 7 суток'
+        description 'event_id UUID (16 Б) · type like/unlike/view (1 Б) · post_id (8 Б) · user_id (8 Б) · timestamp (8 Б).'
       }
-      dlq = queue 'engagements-dlq' {
-        technology '3 partitions · retention 7 суток'
-        description 'Ошибки схемы и отсутствующие посты. Возможны повторные dead letters.'
-        style { color cacheRose }
-      }
-      offsets = queue '__consumer_offsets' {
-        technology 'Kafka internal topic'
-        description 'Подтверждённая позиция consumer group. Обновляется после DB commit и DLQ ack.'
+      dlq = topic 'engagement-events.dlq' {
+        technology 'retention 14 суток'
+        description 'Нечитаемые события. Не блокируют партицию.'
       }
     }
-    postgres = database 'PostgreSQL' {
-      technology 'PostgreSQL 17 · asyncpg'
-      description 'Источник истины. Дедупликация бессрочная; счётчики атомарны с взаимодействиями.'
 
-      posts = table 'posts' {
-        technology 'PK id BIGINT'
-        description 'content TEXT. Целевой каталог: 50 млн постов.'
+    aggregator = service 'Aggregator Workers' {
+      technology 'Python 3.12 · aiokafka · consumer group'
+      description 'Окно 1 с: суммирует +N в памяти по посту. Лайки сразу пишет в БД, просмотры — в Redis, снимок в БД каждые 10–30 с.'
+
+      consumer = component 'Partition consumer' {
+        technology 'poll() · enable.auto.commit=false'
+        description 'Партиция → ровно один агрегатор, поэтому гонок по одному посту нет.'
       }
-      users = table 'users' {
-        technology 'PK id BIGINT · UNIQUE username'
-        description 'В прототипе username — учебная идентификация. Авторизации нет.'
+      likeApplier = component 'Like applier' {
+        technology 'Транзакция на шард'
+        description 'INSERT … ON CONFLICT DO NOTHING / DELETE … RETURNING. likes_count += Δ RETURNING → HSET в Redis абсолютным значением.'
       }
+      viewAggregator = component 'View aggregator' {
+        technology 'Окно 1 с · Lua на слот поста'
+        description 'Атомарно в Redis: SET NX evt:{post_id}:{event_id} + HINCRBY views. Повтор события → 0.'
+      }
+      flusher = component 'Snapshot flusher' {
+        technology 'Каждые 10–30 с'
+        description 'Пишет views_count абсолютным значением из Redis в post_counters, затем commit offsets.'
+      }
+    }
+
+    redis = database 'Redis Cluster' {
+      technology 'Redis 7.4 · шарды по post_id · replica на шард'
+      description 'Главное хранилище чтений: все 50 млн счётчиков в памяти, чтение 1–2 мс. allkeys-lru только как страховка.'
+
+      counterKey = key 'counter:{post_id}' {
+        technology 'HASH {likes, views} · без TTL'
+        description '50 млн × 100 Б ≈ 5 ГБ.'
+      }
+      viewKey = key 'view:{post_id}:{user_id}' {
+        technology 'STRING · TTL 1 ч'
+        description 'Дедупликация просмотров. 18 000/с × 3600 с × 100 Б ≈ 6,5 ГБ.'
+      }
+      eventKey = key 'evt:{post_id}:{event_id}' {
+        technology 'STRING · TTL 1 ч'
+        description 'Защита от повторной доставки Kafka. Хеш-тег {post_id} держит ключ в слоте счётчика.'
+      }
+    }
+
+    db = database 'Database' {
+      technology 'PostgreSQL 17 · шарды по post_id · primary + replica'
+      description 'Источник истины для лайков. Снимок счётчиков для восстановления Redis.'
+
       likes = table 'likes' {
-        technology 'UNIQUE (post_id, user_id)'
-        description 'Один лайк навсегда. Только INSERT RETURNING даёт новый инкремент.'
+        technology 'PK (post_id, user_id) · ≈ 50 Б/строка'
+        description 'post_id, user_id, created_at. Один лайк на пару. Рост ≈ 8 ГБ/сутки, ≈ 3 ТБ/год.'
       }
-      view_records = table 'views' {
-        technology 'UNIQUE (post_id, user_id)'
-        description 'Один просмотр навсегда. Без окон и TTL.'
-      }
-      stripes = table 'post_counters' {
-        technology 'PK (post_id, stripe) · BIGINT counts'
-        description 'stripe = user_id % 16. UPSERT новых инкрементов; чтение SUM полос.'
+      postCounters = table 'post_counters' {
+        technology 'PK post_id · ≈ 50 Б/строка'
+        description 'likes_count, views_count, updated_at. 50 млн × 50 Б ≈ 2,5 ГБ.'
       }
     }
-    redis = database 'Redis' {
-      technology 'Redis 7.4 · cache-aside'
-      description 'Счётчики: TTL 300 мс. Наличие поста: TTL 30 с. Восстанавливаемый кэш.'
-      style { color cacheRose }
-    }
-    migrate = job 'Alembic' {
-      technology 'alembic upgrade head'
-      description 'Однократный job до API и worker. Advisory lock сериализует миграции.'
+
+    observability = service 'Observability' {
+      #planned
+      technology 'Prometheus · Grafana · OpenTelemetry'
+      description 'Consumer lag, возраст события, p99 по методам и кодам, retry rate, hit rate.'
     }
   }
 
-  client -> counters.api.http 'HTTP / JSON'
-  operator -> counters.api 'Health и API metrics'
-  operator -> counters.worker 'Lag и возраст событий'
-  operator -> counters.migrate 'Применить миграции'
-  counters.api.http -> counters.api.accept 'POST /like, /view'
-  counters.api.http -> counters.api.posts 'POST и GET /post'
-  counters.api.accept -> counters.api.cache 'Проверить post:exists'
-  counters.api.accept -> counters.postgres.posts 'Проверить пост при cache miss'
-  counters.api.accept -> counters.api.publisher 'Отправить событие'
-  counters.api.publisher -> counters.kafka.events 'Publish · acks=all'
-  counters.api.posts -> counters.api.cache 'Прочитать или заполнить кэш'
-  counters.api.posts -> counters.postgres.posts 'Создание и чтение постов'
-  counters.api.posts -> counters.postgres.stripes 'SUM ≤ 16 строк'
-  counters.api.cache -> counters.redis 'GET / SET NX'
-  counters.kafka.events -> counters.worker.consumer 'Consume · batch ≤ 500'
-  counters.worker.consumer -> counters.worker.decoder 'Пакет и offsets'
-  counters.worker.decoder -> counters.worker.transaction 'Валидные события'
-  counters.worker.decoder -> counters.worker.completion 'Невалидные записи'
-  counters.worker.transaction -> counters.postgres 'UNIQUE + UPSERT · COMMIT'
-  counters.worker.transaction -> counters.worker.completion 'Результат после DB commit'
-  counters.worker.completion -> counters.kafka.dlq 'Dead letters · await ack'
-  counters.worker.completion -> counters.kafka.offsets 'Commit offsets'
-  counters.migrate -> counters.postgres 'Версии схемы'
-  counters.postgres.likes -> counters.postgres.posts 'post_id · CASCADE'
-  counters.postgres.likes -> counters.postgres.users 'user_id · CASCADE'
-  counters.postgres.view_records -> counters.postgres.posts 'post_id · CASCADE'
-  counters.postgres.view_records -> counters.postgres.users 'user_id · CASCADE'
-  counters.postgres.stripes -> counters.postgres.posts 'post_id · CASCADE'
+  // Клиент и край
+  user -> idp 'Вход' {
+    technology 'OIDC'
+  }
+  user -[rest]-> platform.gateway 'Лайк, просмотр, счётчики' {
+    technology 'HTTPS · REST/JSON'
+  }
+  platform.gateway -> idp 'JWKS'
+  platform.gateway -[grpc]-> platform.writeSvc 'like / view' {
+    technology 'gRPC · HTTP/2 · deadline 300 мс'
+  }
+  platform.gateway -[grpc]-> platform.readSvc 'get counters' {
+    technology 'gRPC · HTTP/2 · deadline 100 мс'
+  }
+  bench -[grpc]-> platform.writeSvc 'Сценарии нагрузки' {
+    technology 'gRPC'
+  }
+  bench -[rest]-> platform.writeSvc 'Те же сценарии' {
+    technology 'REST/JSON'
+  }
+  bench -[grpc]-> platform.readSvc 'BatchGetCounters' {
+    technology 'gRPC'
+  }
+  bench -[rest]-> platform.readSvc 'GET /counters' {
+    technology 'REST/JSON'
+  }
+
+  // Write Service
+  platform.writeSvc.likeHandler -> platform.writeSvc.publisher 'like / unlike'
+  platform.writeSvc.viewTokens -> platform.writeSvc.viewDedup 'Токен валиден'
+  platform.writeSvc.viewDedup -> platform.redis.viewKey 'SET NX EX 3600' {
+    technology 'RESP · 20 мс'
+  }
+  platform.writeSvc.viewDedup -> platform.writeSvc.publisher 'Новый просмотр'
+  platform.writeSvc.publisher -[async]-> platform.kafka.events 'event · acks=all' {
+    technology 'Kafka protocol'
+  }
+
+  // Read Service
+  platform.readSvc.countersQuery -> platform.readSvc.localCache 'Горячие посты'
+  platform.readSvc.countersQuery -> platform.redis.counterKey 'HGETALL · pipeline' {
+    technology 'RESP · 20 мс'
+  }
+  platform.readSvc.countersQuery -> platform.db.postCounters 'Cache miss' {
+    technology 'asyncpg · replica · 50 мс'
+  }
+  platform.readSvc.countersQuery -> platform.readSvc.likedByMe 'Для авторизованного'
+  platform.readSvc.likedByMe -> platform.db.likes 'PK lookup' {
+    technology 'asyncpg · replica'
+  }
+
+  // Aggregator
+  platform.kafka.events -[async]-> platform.aggregator.consumer 'consume'
+  platform.aggregator.consumer -> platform.aggregator.likeApplier 'like / unlike'
+  platform.aggregator.consumer -> platform.aggregator.viewAggregator 'view'
+  platform.aggregator.likeApplier -> platform.db.likes 'insert / delete RETURNING' {
+    technology 'asyncpg · транзакция на шард'
+  }
+  platform.aggregator.likeApplier -> platform.db.postCounters 'likes_count += Δ RETURNING'
+  platform.aggregator.likeApplier -> platform.redis.counterKey 'HSET likes = значение БД'
+  platform.aggregator.viewAggregator -> platform.redis.eventKey 'SET NX'
+  platform.aggregator.viewAggregator -> platform.redis.counterKey 'HINCRBY views (окно 1 с)'
+  platform.aggregator.flusher -> platform.redis.counterKey 'HGET views'
+  platform.aggregator.flusher -> platform.db.postCounters 'views_count = снимок · 10–30 с'
+  platform.aggregator.flusher -[async]-> platform.kafka.events 'commit offsets'
+  platform.aggregator.consumer -[async]-> platform.kafka.dlq 'Нечитаемые события'
+
+  // Данные
+  platform.db.likes -> platform.db.postCounters 'post_id'
+
+  // Эксплуатация
+  operator -> platform.observability 'Дашборды и алерты'
+  platform.observability -> platform.aggregator 'Lag · event age'
+  platform.observability -> platform.writeSvc 'p99 · коды'
+  platform.observability -> platform.readSvc 'p99 · hit rate'
 }

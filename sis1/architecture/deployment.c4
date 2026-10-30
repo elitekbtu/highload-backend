@@ -1,39 +1,132 @@
-deployment {
-  local = environment 'Docker Compose · один хост' {
-    description 'Базовый docker-compose.yml: один API и один worker. worker можно масштабировать через --scale worker=N. Три брокера на одном хосте не защищают от потери хоста. Балансировщик, PG replica, backup и шардирование не реализованы.'
+model {
+  toxiproxy = tool 'Toxiproxy' {
+    #sis2
+    technology 'Fault injection'
+    description 'Задержки и обрывы TCP перед Kafka и Redis: проверка таймаутов, ретраев и идемпотентности.'
+  }
 
-    api = container 'api · :8000' {
-      instanceOf counters.api
+  bench -> toxiproxy 'Включает сбой по сценарию'
+  toxiproxy -> platform.kafka 'Задержка ack · reset'
+  toxiproxy -> platform.redis 'Таймаут Redis'
+}
+
+deployment {
+  stand = environment 'Docker Compose · стенд SIS2' {
+    description 'Один хост. Gateway на стенде не нужен: bench вызывает сервисы напрямую, чтобы замер не включал прокси.'
+
+    write = container 'write-service · :9090 gRPC · :8080 REST' {
+      instanceOf platform.writeSvc
     }
-    worker = container 'worker · internal :8001' {
-      instanceOf counters.worker
+    read = container 'read-service · :9091 gRPC · :8081 REST' {
+      instanceOf platform.readSvc
     }
-    postgres = container 'postgres · volume' {
-      instanceOf counters.postgres
+    aggregator = container 'aggregator' {
+      instanceOf platform.aggregator
     }
-    redis = container 'redis · cache only' {
-      instanceOf counters.redis
+    kafka = container 'kafka × 3 · KRaft' {
+      instanceOf platform.kafka
     }
-    kafka1 = container 'kafka-1 · volume' {
-      instanceOf counters.kafka
+    redis = container 'redis' {
+      instanceOf platform.redis
     }
-    kafka2 = container 'kafka-2 · volume' {
-      instanceOf counters.kafka
+    postgres = container 'postgres' {
+      instanceOf platform.db
     }
-    kafka3 = container 'kafka-3 · volume' {
-      instanceOf counters.kafka
+    benchNode = container 'bench · on demand' {
+      instanceOf bench
     }
-    migrate = container 'migrate · one-shot' {
-      instanceOf counters.migrate
+    toxiNode = container 'toxiproxy' {
+      instanceOf toxiproxy
+    }
+  }
+
+  prod = environment 'Regional backend' {
+    description 'Три зоны. Сервисы без состояния — с запасом на потерю зоны. Redis и БД — шарды по post_id с репликой в другой зоне.'
+
+    zoneA = zone 'Зона A' {
+      k8s = cluster 'Kubernetes' {
+        gateway = instanceOf platform.gateway
+        write = instanceOf platform.writeSvc
+        read = instanceOf platform.readSvc
+        aggregator = instanceOf platform.aggregator
+      }
+      broker = container 'Kafka broker 1' {
+        instanceOf platform.kafka
+      }
+      redis = container 'Redis primaries · шарды 1..k' {
+        instanceOf platform.redis
+      }
+      db = container 'DB primaries · шарды 1..n' {
+        instanceOf platform.db
+      }
+    }
+    zoneB = zone 'Зона B' {
+      k8s = cluster 'Kubernetes' {
+        gateway = instanceOf platform.gateway
+        write = instanceOf platform.writeSvc
+        read = instanceOf platform.readSvc
+        aggregator = instanceOf platform.aggregator
+      }
+      broker = container 'Kafka broker 2' {
+        instanceOf platform.kafka
+      }
+      redis = container 'Redis replicas' {
+        instanceOf platform.redis
+      }
+      db = container 'DB replicas' {
+        instanceOf platform.db
+      }
+    }
+    zoneC = zone 'Зона C' {
+      k8s = cluster 'Kubernetes' {
+        gateway = instanceOf platform.gateway
+        write = instanceOf platform.writeSvc
+        read = instanceOf platform.readSvc
+        aggregator = instanceOf platform.aggregator
+      }
+      broker = container 'Kafka broker 3' {
+        instanceOf platform.kafka
+      }
+      ops = container 'Observability' {
+        instanceOf platform.observability
+      }
     }
   }
 }
 
 views {
   deployment view compose {
-    title '03 · Развёртывание / Compose · Реализованный стенд'
-    description 'Реализованный стенд по умолчанию. API и worker ждут migrate и kafka-topics. Служебные kafka-storage и kafka-topics подготавливают volumes и топики; здесь показаны процессы обработки данных и миграция. LikeC4 — отдельный профиль docs и не участвует в обработке запросов.'
-    include local.**
+    title '10 · SIS2 / Стенд и методика замеров'
+    description '''
+      **Что сравнивается.** Write и Read Service отдают gRPC и REST/JSON из одного процесса поверх одних use cases.
+      Разница в цифрах относится только к протоколу и сериализации.
+
+      **Методика**
+      - Один Python-харнесс (asyncio + uvloop, процесс на ядро) для обоих протоколов: одинаковые payload и конкурентность, прогрев 30 с, замер 60 с, 3 прогона.
+      - Открытая модель нагрузки (фиксированный RPS), чтобы coordinated omission не занижал p99.
+      - Сценарии: SetLike, StartView + FinishView, GetCounters, BatchGetCounters на 1/20/50/100 постов.
+      - Латентность: p50/p95/p99/p99.9 (HdrHistogram), RPS, CPU и память сервиса.
+      - Payload: размер сообщения (len(msg.SerializeToString()) против длины JSON в байтах, плюс JSON+gzip)
+        и байты на проводе с заголовками.
+
+      **Проверки устойчивости через Toxiproxy**
+      - Задержка Kafka 300 мс → UNAVAILABLE → повтор → просмотр засчитан один раз.
+      - Двойной PUT like → likes_count +1.
+      - Остаток deadline < 20 мс → немедленный DEADLINE_EXCEEDED.
+      - Redis недоступен → чтение из БД, запись просмотра → UNAVAILABLE.
+    '''
+    include stand.**
     autoLayout LeftRight
+  }
+
+  deployment view production {
+    title '10 · Развёртывание / Production'
+    description '''
+      Gateway, Write, Read и Aggregator — в каждой зоне. Kafka RF 3 / min ISR 2 — брокер на зону.
+      Redis Cluster и шарды БД: primary в одной зоне, реплика в другой, автоматический failover.
+      Kafka ≈ 3,3 ТБ за 7 суток с репликацией, Redis ≈ 19 ГБ, likes + 3 ТБ/год.
+    '''
+    include prod.**
+    autoLayout TopBottom
   }
 }

@@ -1,46 +1,80 @@
 specification {
-  color apiBlue #2563EB
-  color workerGreen #10B981
-  color dataViolet #7C3AED
-  color cacheRose #E11D48
-  color busAmber #D97706
+  color ink #111111
+  color paper #FFFFFF
 
   element person {
     style {
       shape person
-      color gray
+      color paper
     }
   }
   element system {
-    style { color apiBlue }
+    style { color ink }
+  }
+  element external {
+    style { color paper }
+  }
+  element gateway {
+    style { color ink }
   }
   element service {
-    style { color apiBlue }
+    style { color ink }
   }
   element component {
-    style { color apiBlue }
+    style { color ink }
   }
   element database {
     style {
       shape storage
-      color dataViolet
-    }
-  }
-  element queue {
-    style {
-      shape queue
-      color busAmber
+      color ink
     }
   }
   element table {
     style {
       shape storage
-      color dataViolet
+      color paper
     }
   }
-  element job {
-    style { color gray }
+  element key {
+    style {
+      shape storage
+      color paper
+    }
   }
+  element queue {
+    style {
+      shape queue
+      color ink
+    }
+  }
+  element topic {
+    style {
+      shape queue
+      color paper
+    }
+  }
+  element tool {
+    style { color paper }
+  }
+
+  relationship rest {
+    color gray
+    line dashed
+  }
+  relationship grpc {
+    color gray
+    line solid
+  }
+  relationship async {
+    color gray
+    line dotted
+  }
+
+  tag sis2
+  tag planned
+
   deploymentNode environment
+  deploymentNode zone
+  deploymentNode cluster
   deploymentNode container
 }
